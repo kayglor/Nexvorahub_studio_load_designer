@@ -1,0 +1,11 @@
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const mock = () => { const f = () => p; const p = new Proxy(f, { get: (t, k) => k === Symbol.toPrimitive ? (() => '') : k === 'then' ? undefined : p, set: () => true, apply: () => p, ownKeys: () => [], getOwnPropertyDescriptor: (t, k) => Object.getOwnPropertyDescriptor(t, k) }); return p; };
+let code = src.replace("const ExcelJS = require('exceljs');", 'const ExcelJS = { Workbook: function () { return MOCK; } };');
+const i = code.lastIndexOf('wb.xlsx.writeFile');
+code = code.slice(0, i) + `OUTDATA = { REG, data: data.map(r => [...r, groupOf(r[1], r[2]), occOf(r[2])]), GROUPS, MULT, RD_REG, OCC, CATS, SETS, SET_OVR, COMBOS, CSA, RCU, R12TE, CPCTE, CAA, CA70, CA90, CGN, CGB, CGS, DEV, SB_TYPES, SB_SERV, LT_, EXD, IEC, LOADS, USE_CLASSES };`;
+const ctx = { MOCK: mock(), OUTDATA: null, require, console, __dirname: '.' };
+const fn = new Function(...Object.keys(ctx), code + '\nreturn OUTDATA;');
+const out = fn(...Object.values(ctx));
+fs.writeFileSync(process.argv[3], JSON.stringify(out));
+console.log(Object.entries(out).map(([k, v]) => k + ':' + (Array.isArray(v) ? v.length : Object.keys(v).length)).join(' '), fs.statSync(process.argv[3]).size);

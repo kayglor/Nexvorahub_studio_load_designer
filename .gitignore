@@ -1,0 +1,14 @@
+# Personal documents
+*.pdf
+
+# Dependencies and generated build output
+node_modules/
+_build/build_full.js
+package-lock.json
+
+# Office lock / temp files
+~$*
+*.tmp
+
+# Local tool settings
+.claude/
