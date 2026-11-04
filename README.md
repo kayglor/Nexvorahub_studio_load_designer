@@ -10,6 +10,7 @@ Electrical load assessment and design tools for buildings, usable across 94 coun
 | `_build/` | Node.js scripts that generate the workbook. |
 | `app/load-designer.html` | Single-file web app: load assessment and design report generator using the same design data. |
 | `app/src/` | App source, data extractor, local preview server and headless tests. |
+| `site/index.html` | Standalone build of the app for web hosting (deployed on Vercel). Only this folder is published. |
 
 ## Rebuild the workbook
 
@@ -31,6 +32,8 @@ node build-app.js designdata.json
 node test-app.js
 node serve.js
 ```
+
+`build-app.js` writes both `app/load-designer.html` (claude.ai Artifact) and `site/index.html` (website). Commit and push `site/index.html` to redeploy the live site.
 
 `extract-data.js` reads the reference data (countries, densities, factors, cable tables) straight from the workbook generator, so the app and the workbook stay consistent. `serve.js` previews the app at http://localhost:5179/.
 
