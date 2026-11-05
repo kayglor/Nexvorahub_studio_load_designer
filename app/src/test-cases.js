@@ -75,4 +75,56 @@ const old = upgrade({ v: 1, dc: { density: 12 } }); chk('upgrade old project', o
 S.dc = dcSave; R = calcAll();
 out.aiDc = [D.it, Math.round(D.fac), Math.round(a.liqHeat), a.cdu, +a.rackAac.toFixed(1), +a.rackAdc.toFixed(1), Math.round(a.convAC), Math.round(a.convDC), +a.bessMW.toFixed(2), +a.bessMWh.toFixed(3)];
 out.aiChecks = aiFail.length ? aiFail : 'all passed';
+
+// ---- electrical drawing generator (rooms → luminaires, sockets, circuits, checks, DXF) ----
+const dwFail = [], dchk = (name, ok, got) => { if (!ok) dwFail.push(name + (got !== undefined ? ' got ' + JSON.stringify(got) : '')); };
+const dwSave = JSON.stringify({ dwg: S.dwg, rooms: S.dwgRooms, country: S.project.country });
+const findChk = (W, item, st) => W.chk.filter(c => c.item === item && (!st || c.st === st));
+Object.keys(SOCK_BY_COUNTRY).forEach(c => dchk('socket map country exists ' + c, COUNTRIES.some(x => x.name === c)));
+S.project.country = 'United Kingdom'; R = calcAll(); let W = R.W;
+const [off, meet, corr, wc, tea] = W.rooms;
+dchk('UK socket system', W.sock.n === 'BS 1363 13 A (Type G)' && W.sock.ring === 1 && W.lightIn === 6);
+dchk('lumen method office', off.nLum === 79 && near(off.Eavg, 79 * 4000 * 0.48 / 300) && off.Eavg >= 500, [off.nLum, off.Eavg]);
+dchk('lumen method meeting/corridor/WC/tea', meet.nLum === 8 && corr.nLum === 6 && wc.nLum === 6 && tea.nLum === 5, [meet.nLum, corr.nLum, wc.nLum, tea.nLum]);
+dchk('socket guidance', off.nSock === 30 && meet.nSock === 3 && corr.nSock === 1 && wc.nSock === 0 && tea.nSock === 4, W.rooms.map(o => o.nSock));
+dchk('emergency counts', off.nEm === 2 && meet.nEm === 0 && corr.nEm === 2 && wc.nEm === 1 && tea.nEm === 1, W.rooms.map(o => o.nEm));
+const LC = W.C.filter(c => c.kind === 'L'), PC = W.C.filter(c => c.kind === 'P');
+dchk('lighting circuits within 80% of 6 A', LC.length === 3 && LC.every(c => c.w <= 0.8 * 6 * 230 * 0.9 + 1e-6) && LC.reduce((a, c) => a + c.pts, 0) === 79 + 8 + 6 + 6 + 5 + 6, LC.map(c => [c.pts, Math.round(c.w)]));
+dchk('every luminaire circuited', W.rooms.every(o => o.lc.reduce((a, x) => a + x[1], 0) === o.nLum + o.nEm) && W.rooms.every(o => o.pc.reduce((a, x) => a + x[1], 0) === o.nSock));
+dchk('rings ≤ 100 m²', PC.length === 4 && PC.every(c => c.area <= 100 + 1e-6 && c.cc.ring && c.cc.inr === 32 && c.cc.csa === 2.5), PC.map(c => [Math.round(c.area), c.pts]));
+const Lr1 = 2 * 10 + 2 * 35 * (10 / 30);
+dchk('ring VD and Zs (OSG method)', near(PC[0].len, Lr1) && near(PC[0].cc.vd, 18 * 6.5 * Lr1 / 1000 / 230 * 100) && near(PC[0].cc.zs, 0.35 + DD.R12TE[CSA.indexOf(2.5)] * Lr1 / 4 * 1.2 / 1000), [PC[0].len, PC[0].cc.vd, PC[0].cc.zs]);
+dchk('lighting circuits use 6 A RCBO and pass', LC.every(c => c.cc.inr === 6 && /RCBO/.test(c.cc.dev.n) && /^PASS/.test(c.cc.status)), LC.map(c => c.cc.status));
+dchk('example has no failures', W.nBad === 0, W.chk.filter(c => c.st === 'bad'));
+dchk('ways check', findChk(W, 'Distribution board ways', 'ok').length === 1);
+// parameter checks react to bad inputs
+S.dwg.rcd = false; R = calcAll(); dchk('no RCD on sockets fails', findChk(R.W, 'Additional protection by 30 mA RCD', 'bad').length === PC.length);
+S.dwg.rcd = true; S.dwgRooms[0].nLum = 40; R = calcAll(); dchk('too few luminaires fails lux', R.W.chk.some(c => c.scope === off.r.name && c.item === 'Maintained illuminance' && c.st === 'bad'));
+S.dwgRooms[0].nLum = ''; S.dwgRooms[3].type = 'Bathroom / shower'; S.dwgRooms[3].nSock = 1; R = calcAll(); dchk('bathroom socket warns', findChk(R.W, 'Socket-outlets in bathroom', 'warn').length === 1);
+S.dwgRooms[3].type = 'Toilets / WC'; S.dwgRooms[3].nSock = ''; S.dwgRooms[2].nEm = 0; R = calcAll(); dchk('missing emergency fails', R.W.chk.some(c => c.scope === corr.r.name && c.item === 'Emergency lighting' && c.st === 'bad'));
+S.dwgRooms[2].nEm = ''; S.dwgRooms[1].L = 0; R = calcAll(); dchk('zero dimension fails', findChk(R.W, 'Room dimensions', 'bad').length === 1);
+S.dwgRooms[1].L = 6; S.dwg.ways = 8; R = calcAll(); dchk('few ways warns', findChk(R.W, 'Distribution board ways', 'warn').length === 1, R.W.C.length);
+S.dwg.ways = 24; S.dwg.uf = 1.2; R = calcAll(); dchk('UF out of range fails', findChk(R.W, 'Utilisation factor', 'bad').length === 1);
+S.dwg.uf = 0.6; S.dwg.sockType = 'Schuko CEE 7/3 16 A (Type F)'; R = calcAll(); dchk('socket mismatch warns', findChk(R.W, 'Socket-outlet system matches region', 'warn').length === 1 && R.W.C.filter(c => c.kind === 'P').every(c => c.pts <= 8 && c.cc.inr === 16));
+S.dwg.sockType = '';
+// other regions
+S.project.country = 'United States'; R = calcAll(); W = R.W;
+dchk('US NEMA, 180 VA rule, 20 A', /NEMA/.test(W.sock.n) && W.ptsLim === 13 && W.lightIn === 20 && W.vaSock === 180 && W.C.filter(c => c.kind === 'P').every(c => c.pts <= 13 && c.cc.inr === 20), [W.sock.n, W.ptsLim]);
+S.project.country = 'Germany'; R = calcAll(); dchk('Germany Schuko 8 per circuit', /Schuko/.test(R.W.sock.n) && R.W.ptsLim === 8 && R.W.lightIn === 10);
+S.project.country = 'Australia'; R = calcAll(); dchk('Australia AS/NZS 3112', /3112/.test(R.W.sock.n));
+// DXF and SVG for every country
+let dxfBad = [];
+for (const c of COUNTRIES) { S.project.country = c.name; R = calcAll(); const G = dwgGeom(R.W), dxf = toDXF(G), svg = toSVG(G); const lines = dxf.split('\r\n'); lines.pop();
+  if (!/^0\r\nSECTION\r\n2\r\nHEADER/.test(dxf) || !dxf.endsWith('0\r\nEOF\r\n') || lines.length % 2 || /NaN|undefined|Infinity/.test(dxf + svg) || /[^\x00-\x7f]/.test(dxf) || lines.some((l, i) => i % 2 === 0 && !/^\s*\d+$/.test(l))) dxfBad.push(c.name); }
+dchk('DXF valid for all countries', !dxfBad.length, dxfBad);
+S.project.country = 'United Kingdom'; R = calcAll();
+const G = dwgGeom(R.W), dxf = toDXF(G), cnt = t => (dxf.match(new RegExp('\\r\\n0\\r\\n' + t + '\\r\\n', 'g')) || []).length;
+dchk('DXF layers and entities', DWG_LAYERS.every(([n]) => dxf.includes('\r\n2\r\n' + n + '\r\n')) && /AC1009/.test(dxf) && cnt('LINE') > 300 && cnt('CIRCLE') > 20 && cnt('TEXT') > 100, [cnt('LINE'), cnt('CIRCLE'), cnt('TEXT')]);
+view = 'drawings'; render(); const dwHtml = document.querySelector('#main').innerHTML;
+dchk('drawings view', /Parameter checks/.test(dwHtml) && /<svg/.test(dwHtml) && /Final circuit schedule/.test(dwHtml));
+dchk('report + csv', /Lighting and small power – final circuits/.test(reportDoc()) && /FINAL CIRCUITS/.test(csvSchedules()) && /ROOM LOAD SHEET/.test(csvSchedules()));
+dchk('old project upgrade', (() => { const o = upgrade({ v: 1, dc: {} }); return Array.isArray(o.dwgRooms) && o.dwgRooms.length === 0 && o.dwg.board === 'DB-L1'; })());
+const sv = JSON.parse(dwSave); S.dwg = sv.dwg; S.dwgRooms = sv.rooms; S.project.country = sv.country; R = calcAll();
+out.dwg = [R.W.rooms.map(o => [o.nLum, Math.round(o.Eavg), o.nSock, o.nEm]), R.W.C.map(c => [c.ref, c.pts, Math.round(c.w), c.cc.csa, c.cc.status]), [R.W.nOk, R.W.nWarn, R.W.nBad], dxf.length];
+out.dwgChecks = dwFail.length ? dwFail : 'all passed';
 for (const [k, v] of Object.entries(out)) console.log(k, '=', JSON.stringify(v));

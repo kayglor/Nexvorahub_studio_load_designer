@@ -104,6 +104,7 @@ tr.total td{font-weight:600;background:var(--sunk)}
 .kpi span{display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .kpi b{font-family:var(--f-mono);font-weight:500;font-size:20px}
 .kpi small{color:var(--muted);display:block}
+.dwg-wrap{border:1px solid var(--line);border-radius:6px;background:#fff;color:#1b1f1d;overflow:auto;max-height:70vh;padding:8px}.dwg-wrap svg{width:100%;min-width:900px;height:auto;display:block}
 .note{font-size:12.5px;color:var(--muted);max-width:90ch}
 .callout{border-left:3px solid var(--warn);background:var(--warn-soft);padding:8px 12px;border-radius:0 6px 6px 0;font-size:13.5px}
 .toast{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:6px;font-weight:500;z-index:20}
@@ -245,13 +246,21 @@ function exampleProject() {
     ],
     energy: { currency: 'GBP', tariff: 0.25, demand: 3, lf: 0.4, benchmark: 95, co2: '', pvYield: '', pv: 100, batt: 50, shed: 0.05, pfUn: 0.85, pfTg: 0.95, shares: { lighting: 0.2, hvac: 0.4, pumps: 0.15, other: 0.25 }, m: { led: true, pir: true, bms: true, hrv: false, vsd: true, mt: true } },
     compliance: {},
+    dwg: { board: 'DB-L1', ways: 24, sockType: '', sockCircuit: '', maxPts: '', vaSock: '', lightIn: '', lightFill: 0.8, uf: 0.6, mf: 0.8, rcd: true, afdd: false, cable: 0, grp: 1, zdb: '' },
+    dwgRooms: [
+      { id: uid(), name: 'L1 open-plan office', type: 'Office – open plan', L: 20, W: 15, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 10 },
+      { id: uid(), name: 'L1 meeting room', type: 'Meeting room', L: 6, W: 5, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 8 },
+      { id: uid(), name: 'L1 corridor', type: 'Corridor / circulation', L: 20, W: 2, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 3 },
+      { id: uid(), name: 'L1 WCs', type: 'Toilets / WC', L: 5, W: 4, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 12 },
+      { id: uid(), name: 'L1 tea point', type: 'Tea point / kitchenette', L: 4, W: 3, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 6 },
+    ],
   };
 }
 let S;
 try { S = JSON.parse(localStorage.getItem(STORE_KEY)) || null; } catch (e) { S = null; }
 if (!S || S.v !== 1) S = exampleProject();
 // Projects saved before the AI data centre fields existed: fill in the new defaults.
-function upgrade(o) { o.dc = Object.assign({}, exampleProject().dc, o.dc || {}); return o; }
+function upgrade(o) { const ex = exampleProject(); o.dc = Object.assign({}, ex.dc, o.dc || {}); o.dwg = Object.assign({}, ex.dwg, o.dwg || {}); if (!Array.isArray(o.dwgRooms)) o.dwgRooms = []; return o; }
 upgrade(S);
 let saveT;
 function persist() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { } }, 300); }
@@ -369,7 +378,7 @@ function calcCircuit(k, X) {
   const pf = +k.pf || X.pf, ph = +k.ph === 1 ? 1 : 3, vsys = ph === 1 ? X.vln : X.vll;
   const ib = +k.kw ? (ph === 1 ? k.kw * 1000 / (X.vln * pf) : k.kw * 1000 / (SQ3 * X.vll * pf)) : 0;
   const dev = DD.DEV.find(d => d.n === k.dev) || DD.DEV[0];
-  const inr = nextStd(dev.r, ib);
+  const inr = +k.inFix || nextStd(dev.r, ib);
   const cmb = DD.COMBOS[+k.cable] || DD.COMBOS[0];
   const ai = Math.min(DD.CAA.filter(a => a < (+k.amb || 30)).length, DD.CAA.length - 1);
   const ca = (cmb.temp === 70 ? DD.CA70 : DD.CA90)[ai];
@@ -406,6 +415,253 @@ function calcCircuit(k, X) {
   r.spec = (+k.cable === 0 ? `Twin & earth ${csa}/${cpc} mm² Cu (6242Y)` : `${ph === 1 ? 3 : 4}-core ${csa} mm² Cu ${cmb.temp === 70 ? 'PVC/SWA/PVC (BS 6346)' : 'XLPE/SWA/LSZH (BS 6724)'} + ${cpc} mm² cpc`) + ` · ${dev.n} ${inr} A ${poles}` + (+k.icn ? `, ${k.icn} kA` : '') + (rcd ? ` · RCD ${k.rcd} ${k.idn} mA` : '');
   return r;
 }
+/* ---------- electrical drawing generator (final circuits, layout, parameter checks) ---------- */
+// Indicative design libraries – editable defaults, to be confirmed against the standards adopted locally.
+const DWG_LUM = [
+  { n: 'LED panel 600×600 30 W 4000 lm', w: 30, lm: 4000, s: 'panel' },
+  { n: 'LED downlight 15 W 1500 lm', w: 15, lm: 1500, s: 'down' },
+  { n: 'LED batten 1500 mm 40 W 5200 lm', w: 40, lm: 5200, s: 'batten' },
+  { n: 'LED linear pendant 1200 mm 35 W 4500 lm', w: 35, lm: 4500, s: 'batten' },
+  { n: 'LED high-bay 150 W 21000 lm', w: 150, lm: 21000, s: 'highbay' },
+  { n: 'LED bulkhead IP65 10 W 1000 lm', w: 10, lm: 1000, s: 'bulk' },
+];
+// [name, maintained lux (EN 12464-1 indicative), default luminaire index, m² per socket outlet (0 = none), flags]
+const DWG_ROOMS = [
+  ['Office – open plan', 500, 0, 10, {}], ['Office – cellular', 500, 0, 8, {}], ['Meeting room', 500, 0, 10, {}], ['Classroom', 300, 0, 15, {}],
+  ['Corridor / circulation', 100, 1, 50, { route: 1 }], ['Stair', 150, 5, 0, { route: 1 }], ['Toilets / WC', 200, 1, 0, { wet: 1 }], ['Bathroom / shower', 200, 1, 0, { wet: 1, bath: 1 }],
+  ['Tea point / kitchenette', 300, 1, 3, { wet: 1 }], ['Store', 100, 2, 30, {}], ['Plant room', 200, 2, 20, { plant: 1 }], ['Retail sales floor', 300, 1, 25, {}],
+  ['Warehouse – high bay', 200, 4, 100, {}], ['Car park', 75, 5, 0, {}], ['Dwelling – living room / bedroom', 100, 1, 5, { res: 1 }], ['Dwelling – kitchen', 300, 1, 3, { res: 1, wet: 1 }],
+].map(r => ({ n: r[0], lux: r[1], lum: r[2], m2s: r[3], ...r[4] }));
+// Socket-outlet systems. ring: BS 1363 standard circuits (BS 7671 Appendix 15); In: radial circuit rating; pts: practice limit per circuit ('nec' = 180 VA per yoke, NEC 220.14(I))
+const SOCK = [
+  { n: 'BS 1363 13 A (Type G)', ring: 1, In: 32, ref: 'BS 7671 App. 15; BS 1363' },
+  { n: 'Schuko CEE 7/3 16 A (Type F)', In: 16, pts: 8, ref: 'IEC 60364 / national practice; CEE 7/3' },
+  { n: 'French CEE 7/5 16 A (Type E)', In: 16, pts: 8, ref: 'NF C 15-100 / national practice' },
+  { n: 'Danish 16 A (Type K)', In: 16, pts: 8, ref: 'DS/HD 60364 / national practice' },
+  { n: 'Italian CEI 23-50 (Type L/F)', In: 16, pts: 8, ref: 'CEI 64-8 / national practice' },
+  { n: 'Swiss SN 441011 (Type J)', In: 13, pts: 8, ref: 'NIN SEV 1000 / national practice' },
+  { n: 'Israeli SI 32 16 A (Type H)', In: 16, pts: 8, ref: 'Israeli electricity law / practice' },
+  { n: 'Brazil NBR 14136 (Type N)', In: 16, pts: 8, ref: 'NBR 5410' },
+  { n: 'SANS 164 (Type M/N)', In: 20, pts: 10, ref: 'SANS 10142-1' },
+  { n: 'IS 1293 (Type D/M)', In: 16, pts: 8, ref: 'IS 732 / national practice' },
+  { n: 'IRAM 2073 (Type I)', In: 16, pts: 8, ref: 'AEA 90364' },
+  { n: 'GB 2099 (Type I/A)', In: 16, pts: 10, ref: 'GB 50054 / national practice' },
+  { n: 'AS/NZS 3112 10 A (Type I)', In: 20, pts: 20, ref: 'AS/NZS 3000 App. C (guidance)' },
+  { n: 'NEMA 5-15R / 5-20R (Type B)', In: 20, pts: 'nec', ref: 'NEC 210.21, 220.14(I)' },
+  { n: 'CSA 5-15R (Type B)', In: 15, pts: 12, ref: 'CEC Rule 12-3000(2)' },
+  { n: 'JIS C 8303 15 A (Type A/B)', In: 20, pts: 10, ref: 'Japan Interior Wiring Code' },
+  { n: 'TIS 166-2549 (Type O)', In: 16, pts: 8, ref: 'EIT standard / practice' },
+  { n: 'CEE 7/16 / mixed (Type C/F)', In: 16, pts: 8, ref: 'IEC 60364 / national practice' },
+];
+const SOCK_BY_COUNTRY = (() => {
+  const m = {}, set = (k, list) => list.split('|').forEach(c => m[c] = k);
+  set(0, 'United Kingdom|Ireland|Hong Kong|Singapore|Malaysia|Brunei|United Arab Emirates|Qatar|Bahrain|Kuwait|Oman|Saudi Arabia|Iraq|Jordan|Nigeria|Ghana|Kenya|Uganda|Tanzania|Malawi|Zambia|Zimbabwe|Botswana|Sierra Leone|Mauritius|Sri Lanka|Maldives');
+  set(1, 'Germany|Austria|Netherlands|Spain|Portugal|Sweden|Norway|Finland|Greece|Romania|Russia|Turkey|South Korea|Indonesia|Egypt|Algeria|Ethiopia|Uruguay|European Union (IEC)');
+  set(2, 'France|Belgium|Czech Republic|Poland|Senegal|Cameroon|Cote d\'Ivoire|Morocco|Tunisia|Mongolia');
+  set(3, 'Denmark'); set(4, 'Italy|Chile'); set(5, 'Switzerland'); set(6, 'Israel'); set(7, 'Brazil'); set(8, 'South Africa|Namibia');
+  set(9, 'India|Nepal|Bangladesh|Pakistan'); set(10, 'Argentina'); set(11, 'China'); set(12, 'Australia|New Zealand|Fiji|Papua New Guinea');
+  set(15, 'Japan|Taiwan'); set(16, 'Thailand'); set(17, 'Vietnam|Peru|Lebanon|Rwanda');
+  return m;
+})();
+function regionalSocket(X) { const i = SOCK_BY_COUNTRY[X.c.name]; return SOCK[i ?? { NEC: 13, CEC: 14, ASNZS: 12 }[X.fam] ?? 1]; }
+const RING_OPTS = [['Ring final 32 A (≤ 100 m²)', 32, 100], ['Radial 32 A (≤ 75 m²)', 32, 75], ['Radial 20 A (≤ 50 m²)', 20, 50]];
+const isBlank = v => v === '' || v == null || !isFinite(+v);
+const dwgRoomType = n => DWG_ROOMS.find(t => t.n === n) || DWG_ROOMS[0];
+
+function calcDwg(X) {
+  const g = S.dwg || {}, rooms = S.dwgRooms || [];
+  const sock = SOCK.find(s => s.n === g.sockType) || regionalSocket(X), sockDef = regionalSocket(X);
+  const uf = +g.uf || 0.6, mf = +g.mf || 0.8, vln = X.vln, ukLike = X.c.name === 'United Kingdom';
+  // NEC / CEC regions: receptacle circuits are 120 V even where lighting runs at 277 V or 347 V
+  const sockV = X.fam === 'NEC' || X.fam === 'CEC' ? Math.min(120, vln) : vln, XS = { ...X, vln: sockV };
+  const lightIn = +g.lightIn || ({ NEC: 20, CEC: 15, ASNZS: 10 }[X.fam] ?? (ukLike ? 6 : 10)), fill = +g.lightFill || 0.8;
+  const vaSock = +g.vaSock || (X.fam === 'NEC' ? 180 : 200), rcdAll = !!g.rcd, zdb = isBlank(g.zdb) ? +S.sizing.ze : +g.zdb;
+  const ringOpt = RING_OPTS.find(o => o[0] === g.sockCircuit) || RING_OPTS[0];
+  const ptsLim = !isBlank(g.maxPts) && +g.maxPts > 0 ? +g.maxPts : sock.pts === 'nec' ? Math.floor(sock.In * sockV / 180) : sock.pts || 8;
+  const R0 = rooms.map((r, i) => {
+    const t = dwgRoomType(r.type), lum = DWG_LUM.find(l => l.n === r.lum) || DWG_LUM[t.lum];
+    const L = +r.L || 0, W = +r.W || 0, A = L * W, lux = isBlank(r.lux) ? t.lux : +r.lux;
+    const nAuto = lux > 0 && A > 0 ? Math.max(1, Math.ceil(lux * A / (lum.lm * uf * mf))) : 0;
+    const nLum = isBlank(r.nLum) ? nAuto : Math.max(0, Math.round(+r.nLum));
+    const sAuto = t.m2s > 0 && A > 0 ? Math.max(1, Math.ceil(A / t.m2s)) : 0, nSock = isBlank(r.nSock) ? sAuto : Math.max(0, Math.round(+r.nSock));
+    const emNeed = t.route || t.plant || A > 60 || (t.wet && A > 8);
+    const emAuto = !emNeed ? 0 : t.route ? Math.max(1, Math.ceil(Math.max(L, W) / 15)) : Math.max(1, Math.ceil(A / 150));
+    const nEm = isBlank(r.nEm) ? emAuto : Math.max(0, Math.round(+r.nEm));
+    const Eavg = A ? nLum * lum.lm * uf * mf / A : 0, wl = nLum * lum.w + nEm * 3;
+    return { r, i, t, lum, L, W, A, lux, nAuto, nLum, sAuto, nSock, emNeed, emAuto, nEm, Eavg, wl, lpd: A ? nLum * lum.w / A : 0, dist: isBlank(r.dist) ? 15 : +r.dist, lc: [], pc: [] };
+  });
+  // ---- lighting circuits: pack luminaires (incl. emergency) up to fill × In ----
+  const circ = [], pfL = 0.9, wMax = fill * lightIn * vln * pfL;
+  let cur = null;
+  const newL = () => { cur = { ref: 'L' + (circ.filter(c => c.kind === 'L').length + 1), kind: 'L', w: 0, pts: 0, rooms: [], len: 0 }; circ.push(cur); };
+  R0.forEach(o => {
+    const per = o.nLum + o.nEm ? o.wl / (o.nLum + o.nEm) : 0; let left = o.nLum + o.nEm;
+    while (left > 0) {
+      if (!cur || cur.w + per > wMax + 1e-9) newL();
+      const fit = Math.max(1, Math.min(left, Math.floor((wMax - cur.w) / (per || 1)) || 1));
+      cur.w += fit * per; cur.pts += fit; left -= fit; o.lc.push([cur.ref, fit]);
+      if (!cur.rooms.includes(o)) { cur.rooms.push(o); }
+    }
+  });
+  // ---- socket circuits ----
+  cur = null; let pn = 0;
+  const newP = () => { cur = { ref: 'P' + (++pn), kind: 'P', w: 0, pts: 0, area: 0, rooms: [], len: 0 }; circ.push(cur); };
+  R0.filter(o => o.nSock > 0).forEach(o => {
+    if (sock.ring) {
+      const lim = ringOpt[2], k = Math.max(1, Math.ceil(o.A / lim)), segA = o.A / k;
+      for (let s = 0; s < k; s++) {
+        const pts = Math.floor(o.nSock / k) + (s < o.nSock % k ? 1 : 0);
+        if (!cur || cur.area + segA > lim + 1e-9) newP();
+        cur.area += segA; cur.pts += pts; cur.w += pts * vaSock; o.pc.push([cur.ref, pts]); if (!cur.rooms.includes(o)) cur.rooms.push(o);
+      }
+    } else {
+      let left = o.nSock;
+      while (left > 0) { if (!cur || cur.pts >= ptsLim) newP(); const fit = Math.min(left, ptsLim - cur.pts); cur.pts += fit; cur.w += fit * vaSock; cur.area += o.A * fit / o.nSock; left -= fit; o.pc.push([cur.ref, fit]); if (!cur.rooms.includes(o)) cur.rooms.push(o); }
+    }
+  });
+  // ---- cable / protection check per circuit (reuses the BS 7671 Appendix 4 engine) ----
+  const C = circ.map(c => {
+    const anyRes = c.rooms.some(o => o.t.res), wet = c.rooms.some(o => o.t.wet);
+    const rcd = c.kind === 'P' ? (X.fam === 'NEC' ? wet || rcdAll : rcdAll) : rcdAll;
+    // route length: board → furthest room, plus the share of each room's (L + W) served by this circuit
+    const frac = o => { const list = c.kind === 'L' ? o.lc : o.pc, tot = c.kind === 'L' ? o.nLum + o.nEm : o.nSock; return tot ? list.filter(x => x[0] === c.ref).reduce((a, x) => a + x[1], 0) / tot : 0; };
+    const dMax = Math.max(0, ...c.rooms.map(o => o.dist)), inRoom = c.rooms.reduce((a, o) => a + (o.L + o.W) * frac(o), 0);
+    c.len = dMax + inRoom;
+    c.desc = (c.kind === 'L' ? 'Lighting – ' : 'Sockets – ') + c.rooms.map(o => o.r.name || o.t.n).join(', ');
+    c.rcd = rcd; c.afdd = !!g.afdd && c.kind === 'P';
+    if (c.kind === 'P' && sock.ring && ringOpt[0].startsWith('Ring')) {
+      // BS 7671 App. 15 ring: 2.5/1.5 mm² T&E, 32 A. VD (OSG method): 20 A at mid-point + 12 A distributed → 6.5 × mV/A/m × ring length.
+      const ix = CSA.indexOf(2.5), Lr = 2 * dMax + 2 * inRoom;
+      const mv = DD.COMBOS[0].mv1[ix], vd = mv * 6.5 * Lr / 1000 / vln * 100, zs = zdb + DD.R12TE[ix] * Lr / 4 * 1.2 / 1000, zsMax = 0.95 * vln / (5 * 32);
+      const vdLim = X.c.vdo, fail = vd > vdLim ? 'Voltage drop' : zs > zsMax && !rcd ? 'Zs too high' : null;
+      c.len = Lr; c.ib = Math.min(c.w / vln, 32); c.cc = { inr: 32, csa: 2.5, cpc: 1.5, vd, zs, zsMax, Iz: null, status: fail ? 'FAIL – ' + fail : zs > zsMax ? 'PASS – ADS by RCD' : 'PASS', fail, ring: true, dev: { n: rcd ? 'RCBO Type B' : 'MCB Type B' } };
+    } else {
+      const inFix = c.kind === 'L' ? lightIn : sock.ring ? ringOpt[1] : sock.In;
+      const kw = c.kind === 'L' ? c.w / 1000 : Math.min(c.w, inFix * sockV * 0.8) / 1000;
+      c.cc = calcCircuit({ ref: c.ref, from: g.board, desc: c.desc, type: c.kind === 'L' ? 'Lighting' : 'Other', kw, pf: c.kind === 'L' ? pfL : 1, ph: 1, dev: rcd ? 'RCBO Type B' : 'MCB Type B', cable: +g.cable || 0, len: c.len, amb: 30, grp: +g.grp || 1, arr: 'Bunched / enclosed', ci: 1, zdb, pfc: '', icn: '', rcd: rcd ? 'Type A' : 'None', idn: rcd ? 30 : '', inFix }, c.kind === 'L' ? X : XS);
+      c.ib = c.cc.ib;
+    }
+    c.anyRes = anyRes;
+    return c;
+  });
+  // ---- parameter checks ----
+  const chk = [], add = (scope, item, res, st, ref) => chk.push({ scope, item, res, st, ref });
+  if (!(uf >= 0.3 && uf <= 0.9)) add('Project', 'Utilisation factor', `${uf}`, 'bad', 'Typical 0.4–0.75');
+  if (!(mf >= 0.5 && mf <= 1)) add('Project', 'Maintenance factor', `${mf}`, 'bad', 'Typical 0.7–0.9');
+  if (sock.n !== sockDef.n) add('Project', 'Socket-outlet system matches region', `${sock.n} selected; regional default ${sockDef.n}`, 'warn', 'Confirm local plug and socket standard');
+  const luxRef = X.fam === 'NEC' ? 'IES lighting handbook / EN 12464-1 (indicative)' : 'EN 12464-1:2021 (indicative)';
+  R0.forEach(o => {
+    const nm = o.r.name || o.t.n;
+    if (!(o.L > 0 && o.W > 0)) { add(nm, 'Room dimensions', 'Length and width must be > 0', 'bad', 'Input'); return; }
+    if (!isBlank(o.r.dist) && +o.r.dist < 0) add(nm, 'Distance to board', 'Must be ≥ 0', 'bad', 'Input');
+    add(nm, 'Maintained illuminance', `${f0(o.Eavg)} lx achieved vs ${o.lux} lx target (${o.nLum} × ${o.lum.n.split(' ').slice(0, 3).join(' ')})`, o.Eavg >= o.lux * 0.999 ? 'ok' : 'bad', luxRef);
+    if (o.lux > 0) { const lpd100 = o.lpd / o.lux * 100; add(nm, 'Lighting power density', `${f1(o.lpd)} W/m² (${f2(lpd100)} W/m² per 100 lx)`, lpd100 <= 2.5 ? 'ok' : 'warn', 'Benchmark ≤ 2.5 W/m²/100 lx (SLL guidance)'); }
+    if (o.emNeed) add(nm, 'Emergency lighting', `${o.nEm} emergency luminaire(s); ${o.emAuto} indicated`, o.nEm >= o.emAuto ? 'ok' : o.nEm > 0 ? 'warn' : 'bad', X.fam === 'NEC' ? 'NFPA 101 §7.9; NEC Art. 700' : 'BS 5266-1 / EN 1838 (spacing to be verified photometrically)');
+    if (o.t.m2s > 0) add(nm, 'Socket-outlet provision', `${o.nSock} outlet(s); guidance ${o.sAuto}`, o.nSock >= o.sAuto ? 'ok' : 'warn', 'Design guidance (1 per ' + o.t.m2s + ' m²)');
+    if (o.t.bath && o.nSock > 0) add(nm, 'Socket-outlets in bathroom', `${o.nSock} outlet(s) shown`, 'warn', X.fam === 'NEC' ? 'NEC 210.8(A)(1), 406.9(C)' : 'BS 7671 701.512.3 (≥ 2.5 m from zone 1) / IEC 60364-7-701');
+  });
+  C.forEach(c => {
+    const st = c.cc.fail === 'REVIEW' ? 'warn' : c.cc.fail ? 'bad' : 'ok';
+    add(c.ref, c.kind === 'L' ? 'Lighting circuit' : 'Socket circuit', `${c.pts} pts, Ib ${f1(c.ib)} A, In ${c.cc.inr} A, ${c.cc.csa ?? '–'} mm², VD ${c.cc.vd != null ? f2(c.cc.vd) : '–'}%, Zs ${c.cc.zs != null ? f2(c.cc.zs) : '–'} Ω – ${c.cc.status || 'review'}`, st, c.cc.ring ? 'BS 7671 App. 15; 525; 411.4' : 'Ib ≤ In ≤ Iz; voltage drop; Zs (reg. 433, 525, 411)');
+    if (c.kind === 'P' && !c.rcd && X.fam !== 'NEC') add(c.ref, 'Additional protection by 30 mA RCD', 'No RCD on socket circuit', 'bad', { IEC: 'BS 7671 411.3.3 / IEC 60364-4-41', CEC: 'CEC Rule 26-704', ASNZS: 'AS/NZS 3000 Cl. 2.6.3' }[X.fam]);
+    if (c.kind === 'P' && X.fam === 'NEC' && c.rooms.some(o => o.t.wet) && !c.rcd) add(c.ref, 'GFCI protection', 'Wet / kitchen location without GFCI', 'bad', 'NEC 210.8');
+    if (c.kind === 'P' && c.anyRes && !c.afdd) add(c.ref, 'Arc-fault protection', 'Dwelling socket circuit without AFDD / AFCI', X.fam === 'NEC' ? 'bad' : 'warn', X.fam === 'NEC' ? 'NEC 210.12' : 'BS 7671 421.1.7 (required in HRRBs, HMOs, PBSA, care homes)');
+    if (c.kind === 'P' && sock.ring) add(c.ref, 'Floor area served', `${f0(c.area)} m² on ${ringOpt[0]}`, c.area <= ringOpt[2] + 1e-6 ? 'ok' : 'bad', 'BS 7671 Appendix 15');
+    if (c.kind === 'P' && !sock.ring) add(c.ref, 'Outlets per circuit', `${c.pts} of ${ptsLim} max`, c.pts <= ptsLim ? 'ok' : 'bad', sock.ref);
+  });
+  const ways = +g.ways || 0, used = C.length;
+  add(g.board || 'Board', 'Distribution board ways', `${used} circuits used of ${ways} ways (${ways ? pct(1 - used / ways) : '–'} spare)`, ways && used <= ways ? (1 - used / ways >= 0.2 ? 'ok' : 'warn') : 'bad', 'Allow ≥ 20% spare ways');
+  const cnt = s => chk.filter(c => c.st === s).length;
+  const lightW = R0.reduce((a, o) => a + o.wl, 0), sockN = R0.reduce((a, o) => a + o.nSock, 0), area = R0.reduce((a, o) => a + o.A, 0);
+  return { rooms: R0, C, chk, sock, sockDef, ringOpt, ptsLim, lightIn, vaSock, uf, mf, rcdAll, area, lightW, sockN, sockVA: sockN * vaSock, nOk: cnt('ok'), nWarn: cnt('warn'), nBad: cnt('bad') };
+}
+
+/* drawing geometry (mm) → DXF R12 and SVG */
+function dwgGeom(W) {
+  const P = [], g = S.dwg, L = (x1, y1, x2, y2, ly) => P.push({ t: 'L', x1, y1, x2, y2, ly }), Ci = (x, y, r, ly) => P.push({ t: 'C', x, y, r, ly }), T = (x, y, h, s, ly, al = 'l', rot = 0) => P.push({ t: 'T', x, y, h, s: String(s), ly, al, rot });
+  const rect = (x1, y1, x2, y2, ly) => { L(x1, y1, x2, y1, ly); L(x2, y1, x2, y2, ly); L(x2, y2, x1, y2, ly); L(x1, y2, x1, y1, ly); };
+  const sym = (s, x, y) => {
+    if (s === 'panel') { rect(x - 300, y - 300, x + 300, y + 300, 'E-LIGHT'); L(x - 300, y - 300, x + 300, y + 300, 'E-LIGHT'); L(x - 300, y + 300, x + 300, y - 300, 'E-LIGHT'); }
+    else if (s === 'down') { Ci(x, y, 150, 'E-LIGHT'); L(x - 106, y - 106, x + 106, y + 106, 'E-LIGHT'); L(x - 106, y + 106, x + 106, y - 106, 'E-LIGHT'); }
+    else if (s === 'batten') { rect(x - 700, y - 60, x + 700, y + 60, 'E-LIGHT'); L(x - 700, y, x + 700, y, 'E-LIGHT'); }
+    else if (s === 'highbay') { Ci(x, y, 300, 'E-LIGHT'); Ci(x, y, 120, 'E-LIGHT'); }
+    else { rect(x - 150, y - 80, x + 150, y + 80, 'E-LIGHT'); Ci(x, y, 60, 'E-LIGHT'); }
+  };
+  const maxRow = 60000, gap = 3000; let x = 0, y = 0, rowH = 0, minY = 0, maxX = 0;
+  W.rooms.forEach(o => {
+    const Lm = Math.max(o.L, 0.5) * 1000, Wm = Math.max(o.W, 0.5) * 1000;
+    if (x > 0 && x + Lm > maxRow) { x = 0; y -= rowH + gap + 1200; rowH = 0; }
+    rect(x, y - Wm, x + Lm, y, 'E-ROOM');
+    T(x, y + 650, 300, `${o.r.name || o.t.n}`, 'E-TEXT'); T(x, y + 250, 180, `${o.t.n} · ${f1(o.A)} m² · ${o.lux} lx target / ${f0(o.Eavg)} lx · ${o.nLum} × ${o.lum.n}`, 'E-TEXT');
+    // luminaires on a regular grid
+    const n = o.nLum, cols = n ? Math.max(1, Math.round(Math.sqrt(n * Lm / Wm))) : 0, rows = n ? Math.ceil(n / cols) : 0;
+    const lref = []; o.lc.forEach(([r, k]) => { for (let i = 0; i < k; i++) lref.push(r); });
+    for (let i = 0; i < n; i++) { const c = i % cols, rI = Math.floor(i / cols), px = x + Lm * (c + 0.5) / cols, py = y - Wm * (rI + 0.5) / rows; sym(o.lum.s, px, py); T(px + 220, py + 180, 140, lref[i] || '', 'E-TEXT'); }
+    // emergency luminaires along the lower wall
+    for (let k = 0; k < o.nEm; k++) { const px = x + Lm * (k + 0.5) / o.nEm, py = y - Wm + 450; Ci(px, py, 160, 'E-EMERG'); T(px, py, 160, 'E', 'E-EMERG', 'c'); T(px + 220, py + 120, 140, lref[n + k] || '', 'E-TEXT'); }
+    // socket outlets evenly round the perimeter
+    const per = 2 * (Lm + Wm), pref = []; o.pc.forEach(([r, k]) => { for (let i = 0; i < k; i++) pref.push(r); });
+    for (let k = 0; k < o.nSock; k++) {
+      let d = per * (k + 0.5) / o.nSock, px, py, ix = 0, iy = 0;
+      if (d < Lm) { px = x + d; py = y; iy = -1; } else if ((d -= Lm) < Wm) { px = x + Lm; py = y - d; ix = -1; } else if ((d -= Wm) < Lm) { px = x + Lm - d; py = y - Wm; iy = 1; } else { d -= Lm; px = x; py = y - Wm + d; ix = 1; }
+      const cx = px + ix * 200, cy = py + iy * 200; rect(cx - 150, cy - 150, cx + 150, cy + 150, 'E-POWER'); L(cx - 60, cy - 90, cx - 60, cy + 90, 'E-POWER'); L(cx + 60, cy - 90, cx + 60, cy + 90, 'E-POWER');
+      T(cx + ix * 250 - (ix ? 0 : 150), cy + iy * 250 + (iy ? 0 : 200), 140, pref[k] || '', 'E-TEXT');
+    }
+    x += Lm + gap; rowH = Math.max(rowH, Wm); maxX = Math.max(maxX, x); minY = Math.min(minY, y - Wm);
+  });
+  // single-line diagram of the board
+  const C = W.C, sy = minY - 4000, way = 1600, busL = Math.max(6000, (C.length + 1) * way);
+  T(0, sy + 2200, 300, `${g.board} – single-line diagram`, 'E-TEXT');
+  L(0, sy + 1600, 0, sy, 'E-SLD'); T(150, sy + 1200, 180, 'Incoming supply / sub-main', 'E-TEXT');
+  L(0, sy, busL, sy, 'E-SLD'); L(0, sy - 60, busL, sy - 60, 'E-SLD'); T(busL + 200, sy - 60, 200, `${g.board} busbar`, 'E-TEXT');
+  C.forEach((c, i) => {
+    const cx = way * (i + 1); L(cx, sy - 60, cx, sy - 700, 'E-SLD'); rect(cx - 120, sy - 700, cx + 120, sy - 1200, 'E-SLD'); L(cx, sy - 1200, cx, sy - 2600, 'E-SLD');
+    T(cx - 180, sy - 2700, 160, `${c.ref} ${c.cc.dev.n.replace(' Type ', ' ').replace('RCBO', 'RCBO')} ${c.cc.inr ?? '–'}A${c.rcd ? ' 30mA' : ''} – ${c.cc.csa ?? '–'}/${c.cc.cpc ?? '–'} mm² – ${c.pts} pts`, 'E-TEXT', 'r', 90);
+  });
+  // circuit schedule table
+  const cols = [['Ref', 1000], ['Description', 9000], ['Device', 2600], ['In A', 900], ['Cable mm²', 1500], ['Points', 1000], ['Load W', 1300], ['Ib A', 1000], ['Length m', 1200], ['VD %', 1000], ['Zs Ω', 1000], ['Zs max Ω', 1200], ['Result', 3200]];
+  const tw = cols.reduce((a, c) => a + c[1], 0), rh = 450, ty = sy - 12000;
+  T(0, ty + 400, 300, `${g.board} – final circuit schedule`, 'E-TEXT');
+  const rowsT = [cols.map(c => c[0]), ...C.map(c => [c.ref, c.desc.slice(0, 70), `${c.cc.dev.n}${c.rcd ? ' 30mA' : ''}${c.afdd ? ' +AFDD' : ''}`, c.cc.inr ?? '–', c.cc.csa != null ? `${c.cc.csa}/${c.cc.cpc}` : '–', c.pts, f0(c.w), f1(c.ib), f1(c.len), c.cc.vd != null ? f2(c.cc.vd) : '–', c.cc.zs != null ? f2(c.cc.zs) : '–', c.cc.zsMax != null ? f2(c.cc.zsMax) : '–', c.cc.status])];
+  rowsT.forEach((r, i) => { let cx = 0; const yy = ty - i * rh; r.forEach((v, j) => { T(cx + 80, yy - rh + 130, 180, v, 'E-TABLE'); cx += cols[j][1]; }); L(0, yy - rh, tw, yy - rh, 'E-TABLE'); });
+  L(0, ty, tw, ty, 'E-TABLE'); let cx = 0; cols.forEach(c => { L(cx, ty, cx, ty - rowsT.length * rh, 'E-TABLE'); cx += c[1]; }); L(tw, ty, tw, ty - rowsT.length * rh, 'E-TABLE');
+  // legend + title block
+  const by = ty - rowsT.length * rh - 1500, lx = 0;
+  T(lx, by, 250, 'Legend', 'E-TEXT'); [['panel', 'LED panel'], ['down', 'Downlight'], ['batten', 'Batten / linear'], ['highbay', 'High-bay'], ['bulk', 'Bulkhead']].forEach(([s, t], i) => { sym(s, lx + 800, by - 900 - i * 900); T(lx + 1800, by - 950 - i * 900, 180, t, 'E-TEXT'); });
+  Ci(lx + 800, by - 5400, 160, 'E-EMERG'); T(lx + 800, by - 5400, 160, 'E', 'E-EMERG', 'c'); T(lx + 1800, by - 5450, 180, 'Emergency luminaire (self-contained, 3 h)', 'E-TEXT');
+  rect(lx + 650, by - 6450, lx + 950, by - 6150, 'E-POWER'); T(lx + 1800, by - 6350, 180, `Socket-outlet – ${W.sock.n}`, 'E-TEXT');
+  T(lx + 600, by - 7200, 160, 'Labels L1, P1… = circuit reference at the board', 'E-TEXT');
+  const bx = Math.max(tw, maxX) - 18000, p = S.project; rect(bx, by + 300, bx + 18000, by - 7000, 'E-TITLE');
+  [[`${p.name || 'Project'}`, 400], [`Electrical layout – lighting and small power – ${g.board}`, 250], [`Ref ${p.ref || '–'}   Rev ${p.rev || '–'}   Date ${p.date || '–'}   Stage ${p.stage || '–'}`, 200], [`Region ${p.country} – ${R.X.c.regs}`, 200], [`Supply ${R.X.vln}/${R.X.vll} V ${R.X.c.hz} Hz – ${R.X.c.earthing}`, 200], [`Checks: ${W.nOk} pass, ${W.nWarn} to check, ${W.nBad} fail`, 200], ['Generated by Electrical Load Designer – schematic layout for design development.', 160], ['Not for construction until verified and checked by a competent designer. Units: mm.', 160]].forEach(([s, h], i) => T(bx + 300, by - 300 - i * 800, h, s, 'E-TITLE'));
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  P.forEach(q => { const xs = q.t === 'L' ? [q.x1, q.x2] : [q.x - (q.r || 0), q.x + (q.r || q.h * q.s.length * 0.6)], ys = q.t === 'L' ? [q.y1, q.y2] : [q.y - (q.r || q.h * (q.rot ? q.s.length * 0.6 : 1)), q.y + (q.r || q.h)]; x0 = Math.min(x0, ...xs); x1 = Math.max(x1, ...xs); y0 = Math.min(y0, ...ys); y1 = Math.max(y1, ...ys); });
+  return { P, ext: [x0 - 1000, y0 - 1000, x1 + 1000, y1 + 1000] };
+}
+const DWG_LAYERS = [['E-ROOM', 7], ['E-LIGHT', 2], ['E-EMERG', 3], ['E-POWER', 1], ['E-TEXT', 7], ['E-SLD', 4], ['E-TABLE', 8], ['E-TITLE', 7]];
+function dxfText(s) { return String(s).replace(/[–—]/g, '-').replace(/²/g, '2').replace(/×/g, 'x').replace(/·/g, '-').replace(/°/g, '%%d').replace(/Ω/g, 'ohm').replace(/≤/g, '<=').replace(/≥/g, '>=').replace(/…/g, '...').replace(/[^\x20-\x7e]/g, '?'); }
+function toDXF(G) {
+  const o = [], p = (c, v) => o.push(String(c), typeof v === 'number' ? (Math.round(v * 1000) / 1000).toString() : String(v));
+  p(0, 'SECTION'); p(2, 'HEADER'); p(9, '$ACADVER'); p(1, 'AC1009'); p(9, '$EXTMIN'); p(10, G.ext[0]); p(20, G.ext[1]); p(9, '$EXTMAX'); p(10, G.ext[2]); p(20, G.ext[3]); p(0, 'ENDSEC');
+  p(0, 'SECTION'); p(2, 'TABLES');
+  p(0, 'TABLE'); p(2, 'LTYPE'); p(70, 1); p(0, 'LTYPE'); p(2, 'CONTINUOUS'); p(70, 0); p(3, 'Solid line'); p(72, 65); p(73, 0); p(40, 0); p(0, 'ENDTAB');
+  p(0, 'TABLE'); p(2, 'LAYER'); p(70, DWG_LAYERS.length); DWG_LAYERS.forEach(([n, c]) => { p(0, 'LAYER'); p(2, n); p(70, 0); p(62, c); p(6, 'CONTINUOUS'); }); p(0, 'ENDTAB');
+  p(0, 'TABLE'); p(2, 'STYLE'); p(70, 1); p(0, 'STYLE'); p(2, 'STANDARD'); p(70, 0); p(40, 0); p(41, 1); p(50, 0); p(71, 0); p(42, 2.5); p(3, 'txt'); p(4, ''); p(0, 'ENDTAB');
+  p(0, 'ENDSEC'); p(0, 'SECTION'); p(2, 'ENTITIES');
+  G.P.forEach(q => {
+    if (q.t === 'L') { p(0, 'LINE'); p(8, q.ly); p(10, q.x1); p(20, q.y1); p(30, 0); p(11, q.x2); p(21, q.y2); p(31, 0); }
+    else if (q.t === 'C') { p(0, 'CIRCLE'); p(8, q.ly); p(10, q.x); p(20, q.y); p(30, 0); p(40, q.r); }
+    else if (q.s) { const ha = { l: 0, c: 1, r: 2 }[q.al] || 0; p(0, 'TEXT'); p(8, q.ly); p(10, q.x); p(20, q.y); p(30, 0); p(40, q.h); p(1, dxfText(q.s)); if (q.rot) p(50, q.rot); if (ha) { p(72, ha); p(11, q.x); p(21, q.y); p(31, 0); } }
+  });
+  p(0, 'ENDSEC'); p(0, 'EOF');
+  return o.join('\r\n') + '\r\n';
+}
+const SVG_COL = { 'E-ROOM': 'currentColor', 'E-LIGHT': '#b88a00', 'E-EMERG': '#2c7a4b', 'E-POWER': '#b0281f', 'E-TEXT': 'currentColor', 'E-SLD': '#1f6f8b', 'E-TABLE': '#6b7570', 'E-TITLE': 'currentColor' };
+function toSVG(G, standalone) {
+  const [x0, y0, x1, y1] = G.ext, w = x1 - x0, h = y1 - y0, r = v => Math.round(v);
+  const body = G.P.map(q => q.t === 'L' ? `<line x1="${r(q.x1)}" y1="${r(-q.y1)}" x2="${r(q.x2)}" y2="${r(-q.y2)}" stroke="${SVG_COL[q.ly]}"/>` : q.t === 'C' ? `<circle cx="${r(q.x)}" cy="${r(-q.y)}" r="${r(q.r)}" stroke="${SVG_COL[q.ly]}" fill="none"/>` : q.s ? `<text x="${r(q.x)}" y="${r(-q.y)}" font-size="${r(q.h * 1.25)}" fill="${SVG_COL[q.ly]}" stroke="none" text-anchor="${{ l: 'start', c: 'middle', r: 'end' }[q.al]}"${q.al === 'c' ? ' dominant-baseline="central"' : ''}${q.rot ? ` transform="rotate(${-q.rot} ${r(q.x)} ${r(-q.y)})"` : ''}>${esc(q.s)}</text>` : '').join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${r(x0)} ${r(-y1)} ${r(w)} ${r(h)}"${standalone ? ` width="${r(w / 50)}" height="${r(h / 50)}" style="background:#fff;color:#1b1f1d"` : ' class="dwg"'} stroke-width="${r(Math.max(w, h) / 1500) || 20}" font-family="Arial, sans-serif">${body}</svg>`;
+}
+
 function calcAll() {
   const X = ctx();
   const Z = calcZones(X), Lo = calcLoads(X), Li = calcLifts(X), P = calcPumps(X), D = S.dc.include ? calcDC(X) : null, Dfull = calcDC(X);
@@ -427,8 +683,9 @@ function calcAll() {
   const room = td ? { L: nTx * td[0] + (nTx + 1) * z.clearance, W: td[1] + 2 * z.clearance, H: Math.max(3, td[2] + 0.8), loss: nTx * td[4], oil: z.txType === 'Oil-immersed (ONAN)' ? nTx * td[5] * 1.1 : 0, wt: td[3] } : null;
   if (room) { room.A = room.L * room.W; room.swL = (Math.ceil(z.ways / 4) + nTx + (nTx > 1 ? 1 : 0)) * 0.8; room.swA = (room.swL + 1.6) * (1.0 + 1.5 + 0.8); room.vent = room.loss / (1.2 * 1.005 * 10); }
   const C = S.circuits.map(k => calcCircuit(k, X));
+  const W = calcDwg(X);
   const E = calcEnergy(X, md, kw, Z.area + (D ? D.white : 0));
-  return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, E };
+  return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, W, E };
 }
 function calcEnergy(X, md, kw, area) {
   const e = S.energy, sh = e.shares;
@@ -472,7 +729,7 @@ function cfail(R, key, extra = '') { const n = R.C.filter(c => c.fail === key).l
 /* ---------- views ---------- */
 const VIEWS = [
   ['project', 'Project & region'], ['area', 'Area load schedule'], ['equipment', 'Equipment loads'], ['lifts-pumps', 'Lifts & pumps'], ['data-centre', 'Data centre'],
-  ['sizing', 'Supply & equipment'], ['circuits', 'Cables & protection'], ['energy', 'Energy management'], ['compliance', 'Compliance'], ['report', 'Design report'],
+  ['sizing', 'Supply & equipment'], ['circuits', 'Cables & protection'], ['energy', 'Energy management'], ['compliance', 'Compliance'], ['drawings', 'Electrical drawings'], ['report', 'Design report'],
 ];
 let view = (location.hash || '').slice(1); if (!VIEWS.some(v => v[0] === view)) view = 'project';
 let R = calcAll();
@@ -491,6 +748,7 @@ function railStatus(id) {
   if (id === 'circuits') return R.C.some(c => c.fail && c.fail !== 'REVIEW') ? 'bad' : R.C.some(c => c.fail === 'REVIEW') ? 'warn' : 'ok';
   if (id === 'compliance') { const st = CHECKS.map(c => c[2](R)[1]); return st.includes('bad') ? 'bad' : st.includes('warn') ? 'warn' : 'ok'; }
   if (id === 'sizing') return R.txKva ? 'ok' : 'bad';
+  if (id === 'drawings') return !R.W.rooms.length ? '' : R.W.nBad ? 'bad' : R.W.nWarn ? 'warn' : 'ok';
   return '';
 }
 function renderRail() {
@@ -655,7 +913,43 @@ V.compliance = () => {
   <div class="tbl-wrap"><table><thead><tr><th>#</th><th>Requirement</th><th>Reference</th><th>Design result</th><th>Auto</th><th>Engineer status</th><th>Evidence</th></tr></thead><tbody>${rows}</tbody></table></div>
   <p class="note">Clause references are guidance; confirm against the edition adopted locally. This checklist does not replace certification by a competent person.</p></section>`;
 };
-V.report = () => `<section class="sheet">${head('Stage 10', 'Design report', 'A complete electrical load assessment and design report generated from every stage. Save it as an HTML document (opens in any browser or Word, and prints to PDF), or export the schedules as CSV.', `<button class="btn primary" data-act="dl-report">Save report (.html)</button><button class="btn" data-act="dl-csv">Save schedules (.csv)</button><button class="btn" data-act="copy-report">Copy report text</button>`)}
+V.drawings = () => {
+  const g = S.dwg, W = R.W, X = R.X;
+  const n = (i, k, val, ph, w = 70) => `<input type="number" step="any" style="width:${w}px" data-arr="dwgRooms" data-i="${i}" data-k="${k}" value="${esc(val)}" placeholder="${esc(ph)}">`;
+  const rows = W.rooms.map((o, i) => `<tr><td><input data-arr="dwgRooms" data-i="${i}" data-k="name" value="${esc(o.r.name)}"></td>
+    <td class="wide"><select data-arr="dwgRooms" data-i="${i}" data-k="type">${opt(DWG_ROOMS.map(t => t.n), o.r.type)}</select></td>
+    <td>${n(i, 'L', o.r.L, '', 60)}</td><td>${n(i, 'W', o.r.W, '', 60)}</td><td class="n">${f1(o.A)}</td>
+    <td class="wide"><select data-arr="dwgRooms" data-i="${i}" data-k="lum">${opt([{ v: '', t: `${DWG_LUM[o.t.lum].n} (default)` }, ...DWG_LUM.map(l => ({ v: l.n, t: l.n }))], o.r.lum)}</select></td>
+    <td>${n(i, 'lux', o.r.lux, o.t.lux, 60)}</td><td>${n(i, 'nLum', o.r.nLum, o.nAuto, 60)}</td><td class="n">${f0(o.Eavg)}</td><td>${n(i, 'nSock', o.r.nSock, o.sAuto, 60)}</td><td>${n(i, 'nEm', o.r.nEm, o.emAuto, 60)}</td><td>${n(i, 'dist', o.r.dist, 15, 60)}</td>
+    <td class="n">${f0(o.wl)}</td><td class="n">${f1(o.lpd)}</td><td><button class="btn small ghost" data-del="dwgRooms" data-i="${i}" aria-label="Remove room">✕</button></td></tr>`).join('');
+  const crow = W.C.map(c => `<tr><td>${esc(c.ref)}</td><td>${esc(c.desc)}</td><td>${esc(c.cc.dev.n)}${c.rcd ? ' 30 mA' : ''}${c.afdd ? ' + AFDD' : ''}</td><td class="n">${c.cc.inr ?? '–'}</td><td class="n">${c.cc.csa != null ? `${c.cc.csa}/${c.cc.cpc}` : '–'}</td><td class="n">${c.pts}</td><td class="n">${f0(c.w)}</td><td class="n">${f1(c.ib)}</td><td class="n">${f1(c.len)}</td><td class="n">${c.cc.vd != null ? f2(c.cc.vd) : '–'}</td><td class="n">${c.cc.zs != null ? f2(c.cc.zs) : '–'}</td><td>${pill(c.cc.fail === 'REVIEW' ? 'warn' : c.cc.fail ? 'bad' : 'ok', c.cc.status || 'Review')}</td></tr>`).join('');
+  const chk = W.chk.map(c => `<tr><td>${esc(c.scope)}</td><td>${esc(c.item)}</td><td>${esc(c.res)}</td><td>${pill(c.st, { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st])}</td><td class="note">${esc(c.ref)}</td></tr>`).join('');
+  const sockOpts = [{ v: '', t: `${W.sockDef.n} (regional default)` }, ...SOCK.map(s => ({ v: s.n, t: s.n }))];
+  return `<section class="sheet">${head('Stage 10', 'Electrical drawings', 'Generate a lighting and small-power layout, board schedule and single-line diagram from basic room parameters, check them, and save as DXF to open in AutoCAD.', `<button class="btn primary" data-act="dl-dxf">Save drawing (.dxf)</button><button class="btn" data-act="dl-svg">Save preview (.svg)</button>`)}
+  <p class="callout">Schematic layout for design development: fittings are placed on a regular grid and sockets evenly round each room, then circuited automatically. Quantities use the lumen method and indicative guidance; open the DXF in AutoCAD (OPEN, or INSERT into your sheet) and adjust to the architecture. Checks are a pre-check, not certification.</p>
+  <h3>Design parameters</h3><div class="grid">
+   ${fld('Distribution board', inp('dwg.board', g.board))}${fld('Board ways', inp('dwg.ways', g.ways, 'number'), 'Keep ≥ 20% spare')}
+   ${fld('Socket-outlet system', sel('dwg.sockType', sockOpts, g.sockType), esc(W.sock.ref))}
+   ${W.sock.ring ? fld('Socket circuit arrangement', sel('dwg.sockCircuit', RING_OPTS.map(o => o[0]), W.ringOpt[0]), 'BS 7671 Appendix 15 standard circuits') : fld('Max outlets per circuit', inp('dwg.maxPts', g.maxPts, 'number', `placeholder="${W.ptsLim}"`), `Default ${W.ptsLim} · ${esc(W.sock.ref)}`)}
+   ${fld('Design load per socket (VA)', inp('dwg.vaSock', g.vaSock, 'number', `placeholder="${W.vaSock}"`), X.fam === 'NEC' ? 'NEC 220.14(I): 180 VA per yoke' : 'Diversified, for circuit current')}
+   ${fld('Lighting circuit rating (A)', inp('dwg.lightIn', g.lightIn, 'number', `placeholder="${W.lightIn}"`), 'Regional default when blank')}
+   ${fld('Lighting circuit max loading', inp('dwg.lightFill', g.lightFill, 'number'), '0.8 = 80% of In (NEC continuous-load rule)')}
+   ${fld('Utilisation factor', inp('dwg.uf', g.uf, 'number'), '0.4–0.75')}${fld('Maintenance factor', inp('dwg.mf', g.mf, 'number'), '0.7–0.9')}
+   ${fld('Cable table', sel('dwg.cable', DD.COMBOS.map((c, i) => ({ v: i, t: c.n })), g.cable), 'BS 7671 Appendix 4 ratings')}
+   ${fld('Grouped circuits', inp('dwg.grp', g.grp, 'number'))}${fld('Zdb at board (Ω)', inp('dwg.zdb', g.zdb, 'number', `placeholder="${S.sizing.ze}"`), 'Blank = Ze from Stage 1')}
+   <label class="row" style="gap:8px"><input type="checkbox" id="dwg_rcd" data-p="dwg.rcd" ${g.rcd ? 'checked' : ''} style="width:auto"> 30 mA RCD / GFCI on final circuits</label>
+   <label class="row" style="gap:8px"><input type="checkbox" id="dwg_afdd" data-p="dwg.afdd" ${g.afdd ? 'checked' : ''} style="width:auto"> AFDD / AFCI on socket circuits</label></div>
+  <h3>Rooms</h3><div class="tbl-wrap"><table><thead><tr><th>Room</th><th>Room type</th><th>L m</th><th>W m</th><th>Area m²</th><th>Luminaire</th><th>Target lx</th><th>Luminaires</th><th>Achieved lx</th><th>Sockets</th><th>Emergency</th><th>To board m</th><th>Lighting W</th><th>W/m²</th><th></th></tr></thead><tbody>${rows}
+   <tr class="total"><td colspan="4">Total</td><td class="n">${f1(W.area)}</td><td colspan="4"></td><td class="n">${f0(W.sockN)}</td><td colspan="2"></td><td class="n">${f0(W.lightW)}</td><td class="n">${W.area ? f1(W.lightW / W.area) : '–'}</td><td></td></tr></tbody></table></div>
+  <div class="row" style="margin-top:8px"><button class="btn small" data-add="dwgRooms">Add room</button><span class="note">Blank luminaire, socket and emergency counts are calculated (shown greyed).</span></div>
+  <h3>Parameter checks</h3><p>${pill('ok', W.nOk + ' pass')} ${pill('warn', W.nWarn + ' to check')} ${pill('bad', W.nBad + ' fail')}</p>
+  <div class="tbl-wrap"><table><thead><tr><th>Scope</th><th>Check</th><th>Result</th><th>Status</th><th>Reference</th></tr></thead><tbody>${chk}</tbody></table></div>
+  <h3>Final circuit schedule – ${esc(g.board)}</h3><div class="tbl-wrap"><table><thead><tr><th>Ref</th><th>Description</th><th>Device</th><th>In A</th><th>mm²</th><th>Points</th><th>Load W</th><th>Ib A</th><th>Length m</th><th>VD %</th><th>Zs Ω</th><th>Result</th></tr></thead><tbody>${crow}</tbody></table></div>
+  <div class="kpis" style="margin-top:12px">${[['Lighting load', `${f1(W.lightW / 1000)} kW`, `${f1(W.area ? W.lightW / W.area : 0)} W/m² over ${f0(W.area)} m²`], ['Socket outlets', f0(W.sockN), `${f1(W.sockVA / 1000)} kVA design load`], ['Final circuits', `${W.C.length} of ${g.ways} ways`, `${W.C.filter(c => c.kind === 'L').length} lighting · ${W.C.filter(c => c.kind === 'P').length} power`]].map(([a, b, c]) => `<div class="kpi"><span>${a}</span><b>${b}</b><small>${c}</small></div>`).join('')}</div>
+  <p class="note">Area loads in Stage 2 already include general lighting and small power, so these room loads are a cross-check and are not added to the maximum demand again.</p>
+  <h3>Drawing preview</h3><div class="dwg-wrap">${W.rooms.length ? toSVG(dwgGeom(W)) : '<p class="note">Add rooms to generate a drawing.</p>'}</div></section>`;
+};
+V.report = () => `<section class="sheet">${head('Stage 11', 'Design report', 'A complete electrical load assessment and design report generated from every stage. Save it as an HTML document (opens in any browser or Word, and prints to PDF), or export the schedules as CSV.', `<button class="btn primary" data-act="dl-report">Save report (.html)</button><button class="btn" data-act="dl-csv">Save schedules (.csv)</button><button class="btn" data-act="copy-report">Copy report text</button>`)}
   <div class="paper" id="paper">${reportBody()}</div></section>`;
 
 /* ---------- report ---------- */
@@ -689,6 +983,11 @@ function reportBody() {
   ${sec('Supply, transformers and switchgear')}${tbl(['Item', 'Value'], [['Transformers', R.txKva ? `${R.nTx} × ${f0(R.txKva)} kVA, Uk ${S.sizing.uk}%, ${esc(S.sizing.txType)}` : 'Review'], ['Full-load current', R.flc ? `${f0(R.flc)} A` : '–'], ['LV fault level', R.flP ? `${f1(R.flP)} kA (infinite source)` : '–'], ['Main incomer / busbar', R.incomer ? `${f0(R.incomer)} A` : '–'], ['Short-circuit rating', R.icw ? `${R.icw} kA, 1 s` : '–'], ['Transformer room', R.room ? `${f1(R.room.L)} × ${f1(R.room.W)} m, ${f1(R.room.H)} m clear` : '–'], ['LV switchroom', R.room ? `${f1(R.room.swA)} m²` : '–'], ['Ventilation', R.room ? `${f2(R.room.vent)} m³/s for ${f1(R.room.loss)} kW losses` : '–'], ['Standby generator', R.gen ? `${f0(R.gen)} kVA (${pct(S.sizing.essential)} essential × ${S.sizing.genMargin})` : '–']])}
   ${sec('Earthing and bonding')}${tbl(['Item', 'Value'], [['Earthing system', esc(c.earthing)], ['Main earthing conductor', `${R.met} mm² Cu (Table 54.7)`], ['Main protective bonding', `${R.bond} mm² Cu`], ['Transformer neutral–earth', R.nEarth ? `${R.nEarth} mm² Cu` : '–']])}
   ${R.C.length ? sec('Cable and protection schedule') + tbl(['Ref', 'From', 'Description', 'Ib A', 'In A', 'mm²', 'Iz A', 'VD %', 'Zs Ω', 'Result'], R.C.map(r => [esc(r.k.ref), esc(r.k.from), esc(r.k.desc), f1(r.ib), r.inr ?? '–', r.csa ?? '–', r.Iz ? f1(r.Iz) : '–', r.vd != null ? f2(r.vd) : '–', r.zs != null ? f2(r.zs) : '–', esc(r.status)])) + `<ul class="s">${R.C.filter(r => r.spec).map(r => `<li>${esc(r.k.ref)}: ${esc(r.spec)}</li>`).join('')}</ul>` : ''}
+  ${R.W.rooms.length ? sec('Lighting and small power – final circuits') + `<p>Generated layout for board ${esc(S.dwg.board)} using the lumen method (UF ${R.W.uf}, MF ${R.W.mf}) and ${esc(R.W.sock.n)} socket-outlets. Parameter checks: ${R.W.nOk} pass, ${R.W.nWarn} to check, ${R.W.nBad} fail.</p>` +
+    tbl(['Room', 'Type', 'Area m²', 'Luminaires', 'Target / achieved lx', 'W/m²', 'Sockets', 'Emergency', 'Circuits'], R.W.rooms.map(o => [esc(o.r.name), esc(o.t.n), f1(o.A), `${o.nLum} × ${esc(o.lum.n)}`, `${o.lux} / ${f0(o.Eavg)}`, f1(o.lpd), o.nSock, o.nEm, esc([...new Set([...o.lc, ...o.pc].map(x => x[0]))].join(', '))]), ['Total', '', f1(R.W.area), '', '', f1(R.W.area ? R.W.lightW / R.W.area : 0), R.W.sockN, '', '']) +
+    tbl(['Ref', 'Description', 'Device', 'In A', 'mm²', 'Points', 'Load W', 'Ib A', 'VD %', 'Zs Ω', 'Result'], R.W.C.map(c => [esc(c.ref), esc(c.desc), `${esc(c.cc.dev.n)}${c.rcd ? ' 30 mA' : ''}${c.afdd ? ' + AFDD' : ''}`, c.cc.inr ?? '–', c.cc.csa != null ? `${c.cc.csa}/${c.cc.cpc}` : '–', c.pts, f0(c.w), f1(c.ib), c.cc.vd != null ? f2(c.cc.vd) : '–', c.cc.zs != null ? f2(c.cc.zs) : '–', esc(c.cc.status)])) +
+    tbl(['Scope', 'Check', 'Result', 'Status', 'Reference'], R.W.chk.filter(c => c.st !== 'ok').map(c => [esc(c.scope), esc(c.item), esc(c.res), { warn: 'Check', bad: 'Fail' }[c.st], esc(c.ref)])) +
+    `<p class="s">Only checks needing attention are listed. Layout is schematic for design development; luminaire spacing, emergency lighting and socket positions must be verified against photometric data and the architecture. This is a design pre-check, not certification.</p>` : ''}
   ${sec('Energy management')}${tbl(['Item', 'Value'], [['Baseline electricity', `${f0(R.E.base / 1000)} MWh/yr`], ['Savings from measures', `${f0(R.E.savKwh / 1000)} MWh/yr`], ['Solar PV', `${S.energy.pv} kWp, ${f0(R.E.pvGen / 1000)} MWh/yr`], ['Net grid import', `${f0(R.E.imp / 1000)} MWh/yr (${f0(R.E.eui)} kWh/m²/yr)`], ['Annual cost', `${esc(S.energy.currency)} ${f0(R.E.cost)}`], ['Carbon', `${f1(R.E.tco2)} tCO₂e/yr at ${R.E.co2} kg/kWh`], ['Maximum demand after management', `${f0(R.E.mdAfter)} kVA`], ['Power factor correction', `${f0(R.E.bank)} kVAr automatic bank`]])}
   ${sec('Compliance checklist')}${tbl(['#', 'Requirement', 'Reference', 'Design result', 'Engineer status'], comp)}
   ${sec('Assumptions and limitations')}<ul class="s"><li>Load densities are indicative rules of thumb after diversity; replace with measured or manufacturer data at detailed design.</li><li>Regional factors, demand factors and code values are editable defaults and must be verified against the edition of each code adopted locally.</li><li>Cable ratings are BS 7671 Appendix 4 copper values; use local tables where another code family applies.</li><li>Transformer fault levels assume an infinite source; the utility confirms the network fault level and point of connection.</li><li>This report supports, and does not replace, design verification and certification by a competent person.</li></ul>
@@ -710,6 +1009,15 @@ function csvSchedules() {
   R.Lo.rows.forEach(r => L.push([r.l.db, r.l.desc, r.l.cat, r.l.qty, r.l.kw, r.conn.toFixed(1), r.ku, r.df, r.kva.toFixed(1)].map(q).join(',')));
   L.push(''); L.push(q('CABLE AND PROTECTION')); L.push(['Ref', 'From', 'Description', 'Ib A', 'In A', 'csa mm2', 'Iz A', 'VD %', 'Zs ohm', 'cpc mm2', 'Result', 'Specification'].map(q).join(','));
   R.C.forEach(r => L.push([r.k.ref, r.k.from, r.k.desc, r.ib.toFixed(1), r.inr, r.csa, r.Iz?.toFixed(1), r.vd?.toFixed(2), r.zs?.toFixed(3), r.cpc, r.status, r.spec].map(q).join(',')));
+  if (R.W.rooms.length) {
+    const W = R.W;
+    L.push(''); L.push(q('ROOM LOAD SHEET (generated layout)')); L.push(['Room', 'Type', 'Area m2', 'Luminaire', 'Luminaires', 'Target lx', 'Achieved lx', 'Lighting W', 'W/m2', 'Sockets', 'Emergency', 'Distance to board m'].map(q).join(','));
+    W.rooms.forEach(o => L.push([o.r.name, o.t.n, o.A.toFixed(1), o.lum.n, o.nLum, o.lux, o.Eavg.toFixed(0), o.wl.toFixed(0), o.lpd.toFixed(1), o.nSock, o.nEm, o.dist].map(q).join(',')));
+    L.push(''); L.push(q('FINAL CIRCUITS – ' + S.dwg.board)); L.push(['Ref', 'Description', 'Device', 'RCD', 'In A', 'csa mm2', 'cpc mm2', 'Points', 'Load W', 'Ib A', 'Length m', 'VD %', 'Zs ohm', 'Zs max ohm', 'Result'].map(q).join(','));
+    W.C.forEach(c => L.push([c.ref, c.desc, c.cc.dev.n, c.rcd ? '30 mA' : '', c.cc.inr, c.cc.csa, c.cc.cpc, c.pts, c.w.toFixed(0), c.ib?.toFixed(1), c.len.toFixed(1), c.cc.vd?.toFixed(2), c.cc.zs?.toFixed(3), c.cc.zsMax?.toFixed(3), c.cc.status].map(q).join(',')));
+    L.push(''); L.push(q('PARAMETER CHECKS (design pre-check, not certification)')); L.push(['Scope', 'Check', 'Result', 'Status', 'Reference'].map(q).join(','));
+    W.chk.forEach(c => L.push([c.scope, c.item, c.res, { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st], c.ref].map(q).join(',')));
+  }
   if (R.D) {
     const D = R.D, a = D.ai, d = S.dc;
     L.push(''); L.push(q('DATA CENTRE / AI POWER PLANNING (indicative editable defaults – not code values)')); L.push(['Parameter', 'Value', 'Unit', 'Note'].map(q).join(','));
@@ -739,7 +1047,7 @@ function render(keepFocus) {
 function applyPlatform(name) { const p = aiPlatform(name); if (p.name === AI_CUSTOM || p.kw[1] == null) return; Object.assign(S.dc, { density: p.kw[1], liquid: p.liquid, arch: archName(p.arch) }); }
 function setPath(path, val) { const ks = path.split('.'); let o = S; ks.slice(0, -1).forEach(k => o = o[k]); o[ks[ks.length - 1]] = val; }
 function castVal(el) { if (el.type === 'checkbox') return el.checked; if (el.type === 'number') return el.value === '' ? '' : +el.value; return el.value; }
-const NUM_PATHS = /^(project\.(pf|spare)|mainSF|sizing\.|dc\.(area|m2rack|racks|itkw|density|upsEff|upsModule|autonomy|genKva|fuelH|txKva|pue|support|liquid|cduKw|swing|ramp|bessRed|bessMin)|energy\.(tariff|demand|lf|benchmark|pv|batt|shed|pfUn|pfTg))/;
+const NUM_PATHS = /^(project\.(pf|spare)|mainSF|sizing\.|dc\.(area|m2rack|racks|itkw|density|upsEff|upsModule|autonomy|genKva|fuelH|txKva|pue|support|liquid|cduKw|swing|ramp|bessRed|bessMin)|dwg\.(ways|lightFill|uf|mf|grp)$|energy\.(tariff|demand|lf|benchmark|pv|batt|shed|pfUn|pfTg))/;
 let rT;
 function onEdit(e, immediate) {
   const el = e.target;
@@ -754,17 +1062,18 @@ function onEdit(e, immediate) {
 }
 document.addEventListener('input', e => { if (e.target.matches('input:not([type=checkbox]),textarea')) onEdit(e, false); });
 document.addEventListener('change', e => { if (e.target.matches('select,input[type=checkbox],input[type=date]')) onEdit(e, true); });
-const BLANK = { zones: () => ({ id: uid(), desc: 'New zone', type: TYPES[2].name, area: 1000, ovr: '' }), loads: () => ({ id: uid(), db: 'DB-01', desc: 'New item', cat: 'Other / unclassified', qty: 1, kw: 10, pf: '', ku: '', df: '' }), lifts: () => ({ id: uid(), desc: 'Lift group', type: LIFT_TYPES[0], n: 2, persons: 13, floors: 6, fh: 3.5, pop: 300 }), pumps: () => ({ id: uid(), desc: 'Pump', svc: 'Chilled water', q: 10, h: 25, eff: 0.75, duty: 1, stby: 1 }), circuits: () => ({ id: uid(), ref: 'C' + String(S.circuits.length + 1).padStart(2, '0'), from: 'DB-01', desc: 'New circuit', type: 'Other', kw: 3, pf: '', ph: 1, dev: 'MCB Type B', cable: 0, len: 20, amb: 30, grp: 1, arr: 'Bunched / enclosed', ci: 1, zdb: '', pfc: '', icn: 10, rcd: 'None', idn: '' }) };
+const BLANK = { dwgRooms: () => ({ id: uid(), name: 'New room', type: DWG_ROOMS[0].n, L: 6, W: 5, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 15 }), zones: () => ({ id: uid(), desc: 'New zone', type: TYPES[2].name, area: 1000, ovr: '' }), loads: () => ({ id: uid(), db: 'DB-01', desc: 'New item', cat: 'Other / unclassified', qty: 1, kw: 10, pf: '', ku: '', df: '' }), lifts: () => ({ id: uid(), desc: 'Lift group', type: LIFT_TYPES[0], n: 2, persons: 13, floors: 6, fh: 3.5, pop: 300 }), pumps: () => ({ id: uid(), desc: 'Pump', svc: 'Chilled water', q: 10, h: 25, eff: 0.75, duty: 1, stby: 1 }), circuits: () => ({ id: uid(), ref: 'C' + String(S.circuits.length + 1).padStart(2, '0'), from: 'DB-01', desc: 'New circuit', type: 'Other', kw: 3, pf: '', ph: 1, dev: 'MCB Type B', cable: 0, len: 20, amb: 30, grp: 1, arr: 'Bunched / enclosed', ci: 1, zdb: '', pfc: '', icn: 10, rcd: 'None', idn: '' }) };
 let armedNew = false;
 document.addEventListener('click', async e => {
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.add) { S[b.dataset.add].push(BLANK[b.dataset.add]()); persist(); render(); return; }
   if (b.dataset.del) { S[b.dataset.del].splice(+b.dataset.i, 1); persist(); render(); return; }
   const act = b.dataset.act;
-  if (act === 'new') { if (!armedNew) { armedNew = true; b.textContent = 'Click again to clear everything'; b.classList.remove('ghost'); setTimeout(() => { armedNew = false; renderRail(); }, 4000); return; } armedNew = false; const ex = exampleProject(); S = { ...ex, project: { ...ex.project, name: '', ref: '', client: '', site: '', example: false }, zones: [], loads: [], lifts: [], pumps: [], circuits: [], compliance: {} }; persist(); render(); toast('Started a blank project'); }
+  if (act === 'new') { if (!armedNew) { armedNew = true; b.textContent = 'Click again to clear everything'; b.classList.remove('ghost'); setTimeout(() => { armedNew = false; renderRail(); }, 4000); return; } armedNew = false; const ex = exampleProject(); S = { ...ex, project: { ...ex.project, name: '', ref: '', client: '', site: '', example: false }, zones: [], loads: [], lifts: [], pumps: [], circuits: [], dwgRooms: [], compliance: {} }; persist(); render(); toast('Started a blank project'); }
   if (act === 'save-json') save(`${S.project.ref || 'project'}-load-design.json`, JSON.stringify(S, null, 1), 'Project file');
   if (act === 'load-json') $('#fileIn').click();
   if (act === 'dl-report') save(`${S.project.ref || 'project'}-electrical-load-design-report.html`, reportDoc(), 'Report');
+  if (act === 'dl-dxf' || act === 'dl-svg') { if (!R.W.rooms.length) { toast('Add rooms first'); return; } const G = dwgGeom(R.W), base = `${S.project.ref || 'project'}-${(S.dwg.board || 'DB').replace(/[^\w-]+/g, '_')}-electrical-layout`; if (act === 'dl-dxf') save(base + '.dxf', toDXF(G), 'Drawing'); else save(base + '.svg', toSVG(G, true), 'Preview'); }
   if (act === 'dl-csv') save(`${S.project.ref || 'project'}-load-schedules.csv`, csvSchedules(), 'Schedules');
   if (act === 'copy-report') { const t = $('#paper').innerText; try { await navigator.clipboard.writeText(t); toast('Report text copied'); } catch (err) { const r = document.createRange(); r.selectNodeContents($('#paper')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast('Report selected – press Ctrl+C to copy'); } }
 });
@@ -772,7 +1081,7 @@ let DL = null; (async () => { try { DL = await window.claude?.use?.('downloads')
 async function save(name, data, what) {
   if (!DL && !window.claude) {
     // Standalone website: use a normal browser download.
-    const type = /\.html$/.test(name) ? 'text/html' : /\.csv$/.test(name) ? 'text/csv' : 'application/json';
+    const type = /\.html$/.test(name) ? 'text/html' : /\.csv$/.test(name) ? 'text/csv' : /\.dxf$/.test(name) ? 'application/dxf' : /\.svg$/.test(name) ? 'image/svg+xml' : 'application/json';
     const url = URL.createObjectURL(new Blob([data], { type: type + ';charset=utf-8' }));
     const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 2000); toast(`${what} downloaded`); return;
