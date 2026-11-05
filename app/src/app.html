@@ -94,7 +94,7 @@ tr.total td{font-weight:600;background:var(--sunk)}
 .kpi{border:1px solid var(--line);border-radius:6px;padding:10px 12px;background:var(--sunk)}
 .kpi span{display:block;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
 .kpi b{font-family:var(--f-mono);font-weight:500;font-size:20px}
-.kpi small{color:var(--muted)}
+.kpi small{color:var(--muted);display:block}
 .note{font-size:12.5px;color:var(--muted);max-width:90ch}
 .callout{border-left:3px solid var(--warn);background:var(--warn-soft);padding:8px 12px;border-radius:0 6px 6px 0;font-size:13.5px}
 .toast{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:6px;font-weight:500;z-index:20}
@@ -123,9 +123,11 @@ tr.total td{font-weight:600;background:var(--sunk)}
 <input type="file" id="fileIn" accept=".json,application/json" hidden>
 
 <script type="application/json" id="dd">/*DATA*/</script>
+<script type="application/json" id="aidc">/*AIDC*/</script>
 <script>
 "use strict";
 const DD = JSON.parse(document.getElementById('dd').textContent);
+const AIDC = JSON.parse(document.getElementById('aidc').textContent);
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const f0 = (v) => isFinite(v) ? Math.round(v).toLocaleString('en-GB') : '–';
@@ -151,6 +153,14 @@ const CSA = DD.CSA, KS = [[1, 1], [2, .9], [4, .8], [6, .7], [10, .6]];
 const EREG = { 'United Kingdom': [0.21, 900], 'Europe (IEC)': [0.25, 1100], 'USA (NEC)': [0.37, 1400], 'Canada (CEC)': [0.12, 1150], 'Australia / NZ': [0.6, 1500], 'Middle East (GCC)': [0.5, 1750], 'Africa': [0.55, 1650], 'South & SE Asia': [0.7, 1400], 'Latin America & Caribbean': [0.2, 1500], 'East Asia': [0.55, 1200] };
 const TIERS = [['Tier I – Basic capacity', 'Rated-1', 'Class 1', 'N', 'N', 'N', 'N', 1], ['Tier II – Redundant components', 'Rated-2', 'Class 2', 'N+1', 'N+1', 'N+1', 'N', 1], ['Tier III – Concurrently maintainable', 'Rated-3', 'Class 3', 'N+1', 'N+1', 'N+1', 'N+1', 2], ['Tier IV – Fault tolerant', 'Rated-4', 'Class 4', '2N', '2N', '2N', '2N', 2]];
 const COOL = { 'Air-cooled chillers with free cooling': 0.3, 'Water-cooled chillers + cooling towers': 0.22, 'DX CRAC units': 0.45, 'Indirect evaporative / adiabatic': 0.15, 'Direct-to-chip liquid cooling': 0.1, 'Immersion cooling': 0.06 };
+/* AI data centre library (ai-dc-data.json): indicative, dated, editable defaults – never code values */
+const AI_PLAT = AIDC.platforms, AI_ARCH = AIDC.architectures, AI_DYN = AIDC.dynamics;
+const AI_CUSTOM = AI_PLAT[0].name;
+const aiPlatform = (name) => AI_PLAT.find(p => p.name === name) || AI_PLAT[0];
+const archName = (k) => k === 'dc' ? AI_ARCH.dc.name : AI_ARCH.ac.name;
+const archKey = (name) => name === AI_ARCH.dc.name ? 'dc' : 'ac';
+function aiAgeMonths(asOf, now = new Date()) { const t = Date.parse(asOf); return isFinite(t) ? (now.getTime() - t) / (30.4375 * 864e5) : null; }
+function aiStale(asOf, now) { const m = aiAgeMonths(asOf, now); return m != null && m > (AIDC.staleMonths || 6); }
 const RED = (r, n) => ({ 'N': n, 'N+1': n + 1, 'N+2': n + 2, '2N': 2 * n, '2(N+1)': 2 * (n + 1) }[r] ?? n);
 const PUMP_SVC = ['Domestic water booster', 'Chilled water', 'Condenser water', 'LTHW heating', 'Sewage / sump', 'Fire – sprinkler', 'Fire – wet riser / hydrant', 'Irrigation', 'Other'];
 const LIFT_TYPES = ['Passenger – traction MRL (VVVF)', 'Passenger – hydraulic', 'Goods / service – traction', 'Fire-fighting lift (EN 81-72)', 'Bed / passenger – traction'];
@@ -181,7 +191,7 @@ function exampleProject() {
       { id: uid(), desc: 'Domestic water booster set', svc: 'Domestic water booster', q: 3, h: 45, eff: 0.65, duty: 1, stby: 1 },
       { id: uid(), desc: 'Sprinkler pump', svc: 'Fire – sprinkler', q: 30, h: 70, eff: 0.7, duty: 1, stby: 1 },
     ],
-    dc: { include: false, tier: 'Tier III – Concurrently maintainable', method: 'By white-space area', area: 1000, m2rack: 2.5, racks: 400, itkw: 4000, density: 10, cooling: 'Air-cooled chillers with free cooling', fan: 0.05, upsEff: 0.96, upsModule: 500, upsLoad: 0.8, recharge: 0.1, battery: 'Lithium-ion', autonomy: 5, genKva: 2500, genLoad: 0.8, fuelH: 48, txKva: 2500, txLoad: 0.8, pue: 1.35, util: 0.6, support: 600 },
+    dc: { include: false, tier: 'Tier III – Concurrently maintainable', method: 'By white-space area', area: 1000, m2rack: 2.5, racks: 400, itkw: 4000, density: 10, cooling: 'Air-cooled chillers with free cooling', fan: 0.05, upsEff: 0.96, upsModule: 500, upsLoad: 0.8, recharge: 0.1, battery: 'Lithium-ion', autonomy: 5, genKva: 2500, genLoad: 0.8, fuelH: 48, txKva: 2500, txLoad: 0.8, pue: 1.35, util: 0.6, support: 600, platform: AI_CUSTOM, liquid: 0, cduKw: 1500, arch: AI_ARCH.ac.name, swing: 0.5, ramp: 1, bessRed: 0.5, bessMin: 15 },
     sizing: { txCount: 1, resilience: 'N', txLoading: 0.8, uk: 6, txType: 'Cast resin (dry type)', essential: 0.3, genMargin: 1.25, fuelH: 24, mainCsa: 240, clearance: 1.0, ways: 24, ze: 0.35 },
     circuits: [
       { id: uid(), ref: 'C01', from: 'DB-GF', desc: 'Lighting – retail', type: 'Lighting', kw: 1.2, pf: '', ph: 1, dev: 'MCB Type B', cable: 0, len: 25, amb: 30, grp: 2, arr: 'Bunched / enclosed', ci: 1, zdb: 0.45, pfc: '', icn: 10, rcd: 'None', idn: '' },
@@ -196,6 +206,9 @@ function exampleProject() {
 let S;
 try { S = JSON.parse(localStorage.getItem(STORE_KEY)) || null; } catch (e) { S = null; }
 if (!S || S.v !== 1) S = exampleProject();
+// Projects saved before the AI data centre fields existed: fill in the new defaults.
+function upgrade(o) { o.dc = Object.assign({}, exampleProject().dc, o.dc || {}); return o; }
+upgrade(S);
 let saveT;
 function persist() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { } }, 300); }
 
@@ -279,16 +292,34 @@ function calcDC(X) {
   const it = d.method === 'By IT capacity' ? +d.itkw : racks * d.density;
   const white = d.method === 'By white-space area' ? +d.area : racks * d.m2rack;
   const upsLoss = it / d.upsEff - it, rech = it * d.recharge, light = white * 10 / 1000, sup = d.support * 80 * X.pf / 1000;
-  const heat = it + upsLoss + light, cool = heat * (COOL[d.cooling] ?? 0.3), fans = heat * d.fan, anc = it * 0.02;
-  const fac = (it + upsLoss + rech + light + sup + cool + fans + anc) * 1.015;
+  const heat = it + upsLoss + light;
+  // Liquid / air heat split: the liquid share of IT heat goes to CDUs, the rest is residual air cooling.
+  const liq = Math.min(Math.max(+d.liquid || 0, 0), 1), liqHeat = it * liq, airHeat = heat - liqHeat;
+  const liqCoef = d.cooling === 'Immersion cooling' ? COOL['Immersion cooling'] : COOL['Direct-to-chip liquid cooling'];
+  const cool = liqHeat * liqCoef + airHeat * (COOL[d.cooling] ?? 0.3), fans = heat * d.fan, anc = it * 0.02;
+  // Power architecture: grid → 54 V rack busbar conversion chain. LV AC baseline is already in the model (UPS losses);
+  // selecting 800 V DC removes the difference in conversion losses from the facility load.
+  const A = AI_ARCH, isDC = archKey(d.arch) === 'dc';
+  const effAC = (+d.upsEff || 1) * A.ac.dist * A.ac.psu, effDC = A.dc.rect * A.dc.dist * A.dc.psu;
+  const load54 = it * A.ac.psu, inAC = load54 / effAC, inDC = load54 / effDC;
+  const convAC = inAC - load54, convDC = inDC - load54, convSave = inAC - inDC, convAdj = isDC ? -convSave : 0;
+  const fac = (it + upsLoss + rech + light + sup + cool + fans + anc + convAdj) * 1.015;
   const md = fac / X.pf;
   const [, , , rU, rG, rC, rT, paths] = t;
   const upsN = Math.ceil(it / (d.upsModule * d.upsLoad)), upsI = RED(rU, upsN), sys = /2/.test(rU) && rU.startsWith('2') ? 2 : 1;
   const batt = it * d.autonomy / 60 / (0.95 * (d.battery === 'Lithium-ion' ? 0.9 : 0.8));
   const genN = Math.ceil(md / (d.genKva * d.genLoad)), txN = Math.ceil(md / (d.txKva * d.txLoad));
   const rackA = d.density * 1000 / (SQ3 * X.vll * 0.95);
-  const rackPdu = rackA <= 12.8 ? '3-ph 16 A (IEC 60309)' : rackA <= 25.6 ? '3-ph 32 A (IEC 60309)' : rackA <= 50.4 ? '3-ph 63 A (IEC 60309)' : 'Busway tap-off / multiple feeds';
-  return { t, racks, it, white, upsLoss, rech, light, sup, heat, cool, fans, anc, fac, md, pueP: it ? (fac - rech) / it : 0, upsN, upsI, sys, batt: batt * sys, genN, genI: RED(rG, genN), txN, txI: RED(rT, txN), crah: RED(rC, Math.ceil(heat / 150)), chill: RED(rC, Math.ceil(heat / 1500)), paths, rackA, rackPdu, fuel: fac * 0.27 * d.fuelH, energy: it * d.util * 8760 / 1000 * d.pue, red: { rU, rG, rC, rT } };
+  const rackAdc = d.density * 1000 / (A.dc.volts || 800);
+  const rackPdu = isDC ? `${A.dc.volts || 800} V DC busway from sidecar power rack` : rackA <= 12.8 ? '3-ph 16 A (IEC 60309)' : rackA <= 25.6 ? '3-ph 32 A (IEC 60309)' : rackA <= 50.4 ? '3-ph 63 A (IEC 60309)' : 'Busway tap-off / multiple feeds';
+  const plat = aiPlatform(d.platform), podRacks = plat.podRacks || 8;
+  const cdu = liqHeat > 0 && +d.cduKw > 0 ? RED(rC, Math.ceil(liqHeat / d.cduKw)) : 0;
+  // Training-load dynamics and grid-forming BESS smoothing estimate
+  const swing = Math.min(Math.max(+d.swing || 0, 0), 1), bessRed = Math.min(Math.max(+d.bessRed || 0, 0), 1);
+  const swingMW = it * swing / 1000, rampMWs = +d.ramp > 0 ? swingMW / d.ramp : 0;
+  const bessMW = swingMW * bessRed, bessMWh = bessMW * (+d.bessMin || 0) / 60, residMW = swingMW - bessMW;
+  const ai = { plat, podRacks, pods: Math.ceil(racks / podRacks), podKw: podRacks * d.density, liq, liqHeat, airHeat, cdu, isDC, archKey: isDC ? 'dc' : 'ac', effAC, effDC, load54, convAC, convDC, convSave, convAdj, convSaveMWh: convSave * d.util * 8760 / 1000, rackAac: rackA, rackAdc, swing, swingMW, rampMWs, bessRed, bessMW, bessMWh, bessMVA: bessMW / 0.9, residMW, residRamp: +d.ramp > 0 ? residMW / d.ramp : 0, stale: aiStale(plat.asOf), ageM: aiAgeMonths(plat.asOf) };
+  return { ai, t, racks, it, white, upsLoss, rech, light, sup, heat, cool, fans, anc, fac, md, pueP: it ? (fac - rech) / it : 0, upsN, upsI, sys, batt: batt * sys, genN, genI: RED(rG, genN), txN, txI: RED(rT, txN), crah: RED(rC, Math.ceil(airHeat / 150)), chill: RED(rC, Math.ceil(heat / 1500)), paths, rackA, rackPdu, fuel: fac * 0.27 * d.fuelH, energy: it * d.util * 8760 / 1000 * d.pue, red: { rU, rG, rC, rT } };
 }
 function calcCircuit(k, X) {
   const pf = +k.pf || X.pf, ph = +k.ph === 1 ? 1 : 3, vsys = ph === 1 ? X.vln : X.vll;
@@ -505,13 +536,32 @@ V['data-centre'] = () => {
   const dv = (k, l, h) => fld(l, inp('dc.' + k, d[k], 'number'), h);
   return `<section class="sheet">${head('Stage 5', 'Data centre', 'Size a data hall by white-space area, rack count or IT capacity. Redundancy follows the Tier (TIA-942 Rated / EN 50600 class).', `<label class="row" style="gap:6px"><input type="checkbox" id="dc_include" data-p="dc.include" ${d.include ? 'checked' : ''} style="width:auto"> Include in maximum demand</label>`)}
   <div class="grid">${fld('Resilience', sel('dc.tier', TIERS.map(t => t[0]), d.tier), `${D.t[1]} · EN 50600 ${D.t[2]}`)}${fld('Sizing method', sel('dc.method', ['By white-space area', 'By rack count', 'By IT capacity'], d.method))}
-   ${dv('area', 'White space (m²)')}${dv('m2rack', 'Area per rack incl. aisles (m²)', '2.3–3.0')}${dv('racks', 'Racks (rack-count method)')}${dv('itkw', 'IT capacity kW (capacity method)')}${dv('density', 'Rack density (kW/rack)', 'Enterprise 5–10; AI / HPC 30–100+')}
+   ${dv('area', 'White space (m²)')}${dv('m2rack', 'Area per rack incl. aisles (m²)', '2.3–3.0')}${dv('racks', 'Racks (rack-count method)')}${dv('itkw', 'IT capacity kW (capacity method)')}${fld('AI / GPU platform', sel('dc.platform', AI_PLAT.map(p => p.name), d.platform), D.ai.plat.kw[1] != null ? `${D.ai.plat.kw[0]}–${D.ai.plat.kw[2]} kW/rack · ${esc(D.ai.plat.status)}` : 'Enterprise / custom halls')}${dv('density', 'Rack density (kW/rack)', 'Enterprise 5–10; AI 40–600 – filled by platform, editable')}
    ${fld('Cooling technology', sel('dc.cooling', Object.keys(COOL), d.cooling), `${COOL[d.cooling]} kWe per kW heat`)}${dv('upsEff', 'UPS efficiency')}${dv('upsModule', 'UPS module (kW)')}${dv('autonomy', 'Battery autonomy (min)')}
    ${fld('Battery', sel('dc.battery', ['Lithium-ion', 'VRLA'], d.battery))}${dv('genKva', 'Generator unit (kVA)')}${dv('fuelH', 'Fuel autonomy (h)', 'Tier: ≥ 12 h')}${dv('txKva', 'Transformer unit (kVA)')}${dv('pue', 'Annualised PUE')}${dv('support', 'Support / office area (m²)')}</div>
   <h3>Results</h3><div class="kpis">
    ${[['IT critical load', `${f0(D.it)} kW`, `${f0(D.racks)} racks · ${f0(D.white)} m²`], ['Facility peak', `${f0(D.fac)} kW`, `peak PUE ${f2(D.pueP)}`], ['Maximum demand', `${f0(D.md)} kVA`, `${f0(D.md * 1000 / D.white)} VA/m² white space`], ['UPS', `${D.upsI} × ${d.upsModule} kW`, `${D.red.rU} · ${D.sys} system(s) · ${f0(D.batt)} kWh`], ['Generators', `${D.genI} × ${f0(d.genKva)} kVA`, `${D.red.rG} · fuel ${f0(D.fuel)} l`], ['Transformers', `${D.txI} × ${f0(d.txKva)} kVA`, D.red.rT], ['Cooling', `${D.crah} CRAH · ${D.chill} chillers`, `${f0(D.heat)} kW heat · ${f0(D.heat / 3.517)} TR`], ['Rack power', D.rackPdu, `${f1(D.rackA)} A per path · ${D.paths} path(s)`], ['Annual energy', `${f0(D.energy)} MWh`, `PUE ${d.pue}`]].map(([a, b, c]) => `<div class="kpi"><span>${a}</span><b>${b}</b><small>${c}</small></div>`).join('')}</div>
-  <p class="note">Load build-up: IT ${f0(D.it)} + UPS losses ${f0(D.upsLoss)} + recharge ${f0(D.rech)} + cooling ${f0(D.cool)} + fans ${f0(D.fans)} + lighting/support ${f0(D.light + D.sup)} + ancillaries ${f0(D.anc)} kW, plus 1.5% distribution losses. Standards: Uptime Tier Standard, TIA-942-B, EN 50600-2-2, ASHRAE TC 9.9, IEC 62040-3, ISO 8528-1 (DCP), ISO/IEC 30134-2.</p></section>`;
+  <p class="note">Load build-up: IT ${f0(D.it)} + UPS losses ${f0(D.upsLoss)} + recharge ${f0(D.rech)} + cooling ${f0(D.cool)} + fans ${f0(D.fans)} + lighting/support ${f0(D.light + D.sup)} + ancillaries ${f0(D.anc)} kW, plus 1.5% distribution losses. Standards: Uptime Tier Standard, TIA-942-B, EN 50600-2-2, ASHRAE TC 9.9, IEC 62040-3, ISO 8528-1 (DCP), ISO/IEC 30134-2.</p>
+  ${aiDcSection(d, D)}</section>`;
 };
+function aiDcSection(d, D) {
+  const a = D.ai, p = a.plat, dv = (k, l, h) => fld(l, inp('dc.' + k, d[k], 'number'), h), kpi = (rows) => `<div class="kpis">${rows.map(([x, y, z]) => `<div class="kpi"><span>${x}</span><b>${y}</b><small>${z}</small></div>`).join('')}</div>`;
+  const asOf = p.asOf ? `${esc(p.asOf)} ${a.stale ? pill('warn', `Older than ${AIDC.staleMonths} months – re-check`) : pill('ok', 'Current')}` : '–';
+  return `<h3>AI / high-density power planning</h3>
+  <p class="callout">Platform values are indicative planning defaults from vendor announcements and trade press (library v${esc(AIDC.version)}, data as of ${esc(AIDC.asOf)}${aiStale(AIDC.asOf) ? ` – ${pill('warn', 'older than ' + AIDC.staleMonths + ' months')}` : ''}). They are editable and are not verified code or manufacturer values.</p>
+  <div class="grid">${fld('Platform data as of', der(asOf), p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.source)}</a>` : 'Custom – enter your own values')}
+   ${fld('Racks per pod / pods', der(`${a.podRacks} racks · ${f0(a.pods)} pod(s) · ${f0(a.podKw)} kW per pod`))}
+   ${dv('liquid', 'Liquid share of IT heat (0–1)', 'Direct-to-chip 0.8–0.9; air-cooled 0')}${dv('cduKw', 'CDU capacity (kW each)', 'Typical in-row CDU 1,000–2,000 kW')}
+   ${fld('Power architecture', sel('dc.arch', [AI_ARCH.ac.name, AI_ARCH.dc.name], d.arch), p.kw[1] != null ? `Recommended for this platform: ${esc(archName(p.arch))}` : '')}</div>
+  ${kpi([['Heat to liquid', `${f0(a.liqHeat)} kW`, `${pct(a.liq)} of IT · ${a.cdu} CDU(s) (${D.red.rC})`], ['Residual air heat', `${f0(a.airHeat)} kW`, `${D.crah} CRAH at 150 kW`], ['Current per rack', a.isDC ? `${f0(a.rackAdc)} A DC` : `${f0(a.rackAac)} A AC`, a.isDC ? `${AI_ARCH.dc.volts} V DC · AC equivalent ${f0(a.rackAac)} A at ${R.X.vll} V` : `per phase at ${R.X.vll} V · 800 V DC would be ${f0(a.rackAdc)} A`], ['Conversion losses', `${f0(a.isDC ? a.convDC : a.convAC)} kW`, `grid → 54 V · η ${pct(a.isDC ? a.effDC : a.effAC, 1)}`], ['800 V DC vs AC', `${f0(a.convSave)} kW`, `${f0(a.convSaveMWh)} MWh/yr less loss${a.isDC ? ' – applied to facility load' : ' – not applied (AC selected)'}`]])}
+  <p class="note">${esc(AI_ARCH.ac.note)} ${esc(AI_ARCH.dc.note)} Chain efficiencies (AC: UPS ${f2(+d.upsEff)} × ${AI_ARCH.ac.dist} × ${AI_ARCH.ac.psu}; DC: ${AI_ARCH.dc.rect} × ${AI_ARCH.dc.dist} × ${AI_ARCH.dc.psu}) are editable in ai-dc-data.json. DC protection, arc-flash and earthing need specialist design; IEC 60364 / BS 7671 DC provisions and product standards for 800 V DC are still developing.</p>
+  <h3>Training-load dynamics and BESS smoothing</h3><div class="grid">
+   ${dv('swing', 'Peak-to-valley swing (fraction of IT)', 'Synchronous training: large fractions reported; inference lower')}${dv('ramp', 'Ramp time valley → peak (s)', 'Sub-second to a few seconds')}
+   ${dv('bessRed', 'Swing reduction by grid-forming BESS (0–1)', `Reported range ${pct(AI_DYN.bessReduction[0])}–${pct(AI_DYN.bessReduction[1])}`)}${dv('bessMin', 'BESS smoothing duration (min)', 'Energy window for sustained stalls / checkpoints')}</div>
+  ${kpi([['Training swing', `${f1(a.swingMW)} MW`, `ramp ${f1(a.rampMWs)} MW/s`], ['Grid-forming BESS', `${f1(a.bessMW)} MW`, `${f1(a.bessMWh)} MWh · inverter ≈ ${f1(a.bessMVA)} MVA`], ['Grid-visible swing', `${f1(a.residMW)} MW`, `ramp ${f1(a.residRamp)} MW/s after smoothing`]])}
+  <p class="note">${esc(AI_DYN.note)} Estimate only – confirm ramp-rate, oscillation and ride-through limits with the network operator and size the BESS by dynamic study. Sources: ${AI_DYN.sources.map(s => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.source)}</a> (as of ${esc(s.asOf)})`).join('; ')}.</p>
+  <h3>Mitigations</h3><ul class="note">${AI_DYN.mitigations.map(m => `<li>${esc(m)}</li>`).join('')}</ul>`;
+}
 V.sizing = () => {
   const z = S.sizing, r = R.room;
   const parts = [['Area loads', R.Z.kva], ['Equipment', R.Lo.kva], ['Lifts', R.Li.kva], ['Pumps', R.P.kva], ['Data centre', R.D ? R.D.md : 0], ['Spare', R.spare]];
@@ -566,6 +616,16 @@ V.report = () => `<section class="sheet">${head('Stage 10', 'Design report', 'A 
 
 /* ---------- report ---------- */
 function tbl(head, rows, foot) { return `<table class="r"><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${typeof c === 'number' || /^[\d.,–-]+( ?(kVA|kW|A|%|mm²))?$/.test(String(c)) ? ' class="n"' : ''}>${c}</td>`).join('')}</tr>`).join('')}${foot ? `<tr class="t">${foot.map(c => `<td>${c}</td>`).join('')}</tr>` : ''}</tbody></table>`; }
+function aiReportRows(D) {
+  const a = D.ai, p = a.plat, d = S.dc;
+  return [['AI / GPU platform', `${esc(p.name)}${p.asOf ? ` (data as of ${esc(p.asOf)}${a.stale ? ' – older than ' + AIDC.staleMonths + ' months, re-check' : ''})` : ''}`],
+    ['Pods', `${f0(a.pods)} × ${a.podRacks} racks, ${f0(a.podKw)} kW per pod`],
+    ['Liquid / air heat split', `${f0(a.liqHeat)} kW to liquid (${pct(a.liq)} of IT), ${a.cdu} CDU(s) at ${f0(+d.cduKw)} kW; ${f0(a.airHeat)} kW residual air`],
+    ['Power architecture', `${esc(d.arch)}; ${a.isDC ? `${f0(a.rackAdc)} A DC per rack` : `${f0(a.rackAac)} A per phase per rack at ${R.X.vll} V`}`],
+    ['Conversion losses (grid → 54 V)', `AC ${f0(a.convAC)} kW (η ${pct(a.effAC, 1)}) / 800 V DC ${f0(a.convDC)} kW (η ${pct(a.effDC, 1)}); difference ${f0(a.convSave)} kW, ${f0(a.convSaveMWh)} MWh/yr${a.isDC ? ' (applied)' : ' (not applied)'}`],
+    ['Training-load swing', `${f1(a.swingMW)} MW (${pct(a.swing)} of IT), ramp ${f1(a.rampMWs)} MW/s`],
+    ['Grid-forming BESS (estimate)', `${f1(a.bessMW)} MW / ${f1(a.bessMWh)} MWh, ≈ ${f1(a.bessMVA)} MVA; grid-visible swing ${f1(a.residMW)} MW (${pct(a.bessRed)} reduction; reported range ${pct(AI_DYN.bessReduction[0])}–${pct(AI_DYN.bessReduction[1])})`]];
+}
 function reportBody() {
   const p = S.project, X = R.X, c = X.c;
   let n = 0; const sec = (t) => `<h2>${++n}. ${t}</h2>`;
@@ -580,7 +640,7 @@ function reportBody() {
   <p class="s">Design density = base (${esc(p.basis)}) density × regional factor for ${esc(X.dreg)}, unless overridden.</p>
   ${R.Lo.rows.length ? sec('Equipment loads') + tbl(['Board', 'Item', 'Category', 'Connected kW', 'Demand f.', 'Diversity', 'Demand kVA'], R.Lo.rows.map(r => [esc(r.l.db), esc(r.l.desc), esc(r.l.cat), f1(r.conn), f2(r.ku), f2(r.df), f1(r.kva)])) + tbl(['Board', 'Items', 'Ks', 'Demand kVA', 'Current A'], R.Lo.dbs.map(d => [esc(d.name), d.n, f2(d.ks), f1(d.dem), f0(d.amps)]), ['Equipment MD', '', `× ${S.mainSF}`, f1(R.Lo.kva), '']) : ''}
   ${R.Li.rows.length || R.P.rows.length ? sec('Lifts and pumps') + (R.Li.rows.length ? tbl(['Lift group', 'Lifts', 'Rated load kg', 'Speed m/s', 'Motor kW', 'Group kVA', 'HC5 %', 'Interval s'], R.Li.rows.map(r => [esc(r.L.desc), r.L.n, f0(r.load), f2(r.v), f1(r.motor), f1(r.grp), r.hcp == null ? '–' : pct(r.hcp, 1), f0(r.interval)])) : '') + (R.P.rows.length ? tbl(['Pump', 'Service', 'Motor kW', 'Starter / drive', 'FLC A', 'Duty kVA'], R.P.rows.map(r => [esc(r.p.desc), esc(r.p.svc), f2(r.motor), esc(r.starter), f1(r.flc), f1(r.kva)])) : '') : ''}
-  ${R.D ? sec('Data centre') + tbl(['Parameter', 'Value'], [['Resilience', `${esc(R.D.t[0])} (${R.D.t[1]}, EN 50600 ${R.D.t[2]})`], ['IT critical load', `${f0(R.D.it)} kW (${f0(R.D.racks)} racks at ${S.dc.density} kW)`], ['Facility peak / MD', `${f0(R.D.fac)} kW / ${f0(R.D.md)} kVA, peak PUE ${f2(R.D.pueP)}`], ['UPS', `${R.D.upsI} × ${S.dc.upsModule} kW (${R.D.red.rU}), battery ${f0(R.D.batt)} kWh`], ['Generators', `${R.D.genI} × ${f0(S.dc.genKva)} kVA (${R.D.red.rG}), fuel ${f0(R.D.fuel)} l`], ['Transformers', `${R.D.txI} × ${f0(S.dc.txKva)} kVA (${R.D.red.rT})`], ['Cooling', `${R.D.crah} CRAH, ${R.D.chill} chillers, ${f0(R.D.heat)} kW heat`], ['Rack power', `${R.D.rackPdu} on ${R.D.paths} path(s)`]]) : ''}
+  ${R.D ? sec('Data centre') + tbl(['Parameter', 'Value'], [['Resilience', `${esc(R.D.t[0])} (${R.D.t[1]}, EN 50600 ${R.D.t[2]})`], ['IT critical load', `${f0(R.D.it)} kW (${f0(R.D.racks)} racks at ${S.dc.density} kW)`], ['Facility peak / MD', `${f0(R.D.fac)} kW / ${f0(R.D.md)} kVA, peak PUE ${f2(R.D.pueP)}`], ['UPS', `${R.D.upsI} × ${S.dc.upsModule} kW (${R.D.red.rU}), battery ${f0(R.D.batt)} kWh`], ['Generators', `${R.D.genI} × ${f0(S.dc.genKva)} kVA (${R.D.red.rG}), fuel ${f0(R.D.fuel)} l`], ['Transformers', `${R.D.txI} × ${f0(S.dc.txKva)} kVA (${R.D.red.rT})`], ['Cooling', `${R.D.crah} CRAH, ${R.D.chill} chillers, ${f0(R.D.heat)} kW heat`], ['Rack power', `${R.D.rackPdu} on ${R.D.paths} path(s)`], ...aiReportRows(R.D)]) + `<p class="s">AI platform values come from a dated library (v${esc(AIDC.version)}, data as of ${esc(AIDC.asOf)}) of vendor and trade-press figures. They are editable planning defaults, not verified code or manufacturer values; confirm with the vendor, operator and network operator. Mitigations: ${AI_DYN.mitigations.map(esc).join(' ')}</p>` : ''}
   ${sec('Maximum demand')}${tbl(['Source', 'kVA'], [['Area loads', f1(R.Z.kva)], ['Equipment loads', f1(R.Lo.kva)], ['Lifts', f1(R.Li.kva)], ['Pumps (normal supply)', f1(R.P.kva)], ['Data centre', f1(R.D ? R.D.md : 0)], [`Spare (${pct(+p.spare)})`, f1(R.spare)]], ['Total maximum demand', f1(R.md)])}
   ${sec('Supply, transformers and switchgear')}${tbl(['Item', 'Value'], [['Transformers', R.txKva ? `${R.nTx} × ${f0(R.txKva)} kVA, Uk ${S.sizing.uk}%, ${esc(S.sizing.txType)}` : 'Review'], ['Full-load current', R.flc ? `${f0(R.flc)} A` : '–'], ['LV fault level', R.flP ? `${f1(R.flP)} kA (infinite source)` : '–'], ['Main incomer / busbar', R.incomer ? `${f0(R.incomer)} A` : '–'], ['Short-circuit rating', R.icw ? `${R.icw} kA, 1 s` : '–'], ['Transformer room', R.room ? `${f1(R.room.L)} × ${f1(R.room.W)} m, ${f1(R.room.H)} m clear` : '–'], ['LV switchroom', R.room ? `${f1(R.room.swA)} m²` : '–'], ['Ventilation', R.room ? `${f2(R.room.vent)} m³/s for ${f1(R.room.loss)} kW losses` : '–'], ['Standby generator', R.gen ? `${f0(R.gen)} kVA (${pct(S.sizing.essential)} essential × ${S.sizing.genMargin})` : '–']])}
   ${sec('Earthing and bonding')}${tbl(['Item', 'Value'], [['Earthing system', esc(c.earthing)], ['Main earthing conductor', `${R.met} mm² Cu (Table 54.7)`], ['Main protective bonding', `${R.bond} mm² Cu`], ['Transformer neutral–earth', R.nEarth ? `${R.nEarth} mm² Cu` : '–']])}
@@ -606,6 +666,14 @@ function csvSchedules() {
   R.Lo.rows.forEach(r => L.push([r.l.db, r.l.desc, r.l.cat, r.l.qty, r.l.kw, r.conn.toFixed(1), r.ku, r.df, r.kva.toFixed(1)].map(q).join(',')));
   L.push(''); L.push(q('CABLE AND PROTECTION')); L.push(['Ref', 'From', 'Description', 'Ib A', 'In A', 'csa mm2', 'Iz A', 'VD %', 'Zs ohm', 'cpc mm2', 'Result', 'Specification'].map(q).join(','));
   R.C.forEach(r => L.push([r.k.ref, r.k.from, r.k.desc, r.ib.toFixed(1), r.inr, r.csa, r.Iz?.toFixed(1), r.vd?.toFixed(2), r.zs?.toFixed(3), r.cpc, r.status, r.spec].map(q).join(',')));
+  if (R.D) {
+    const D = R.D, a = D.ai, d = S.dc;
+    L.push(''); L.push(q('DATA CENTRE / AI POWER PLANNING (indicative editable defaults – not code values)')); L.push(['Parameter', 'Value', 'Unit', 'Note'].map(q).join(','));
+    [['Resilience', D.t[0], '', ''], ['IT critical load', D.it.toFixed(0), 'kW', `${D.racks} racks`], ['Rack density', d.density, 'kW/rack', ''], ['AI / GPU platform', a.plat.name, '', a.plat.asOf ? `data as of ${a.plat.asOf}${a.stale ? ' (older than ' + AIDC.staleMonths + ' months)' : ''}; ${a.plat.url}` : ''],
+     ['AI data library', AIDC.version, '', `as of ${AIDC.asOf}`], ['Pods', a.pods, 'pods', `${a.podRacks} racks/pod, ${a.podKw.toFixed(0)} kW/pod`], ['Liquid share of IT heat', a.liq, '', ''], ['Heat to liquid', a.liqHeat.toFixed(0), 'kW', `${a.cdu} CDU(s) at ${d.cduKw} kW`], ['Residual air heat', a.airHeat.toFixed(0), 'kW', `${D.crah} CRAH`],
+     ['Power architecture', d.arch, '', ''], ['Current per rack (LV AC)', a.rackAac.toFixed(1), 'A', `per phase at ${R.X.vll} V`], ['Current per rack (800 V DC)', a.rackAdc.toFixed(1), 'A', ''], ['Conversion losses AC', a.convAC.toFixed(0), 'kW', `efficiency ${(a.effAC * 100).toFixed(1)}%`], ['Conversion losses 800 V DC', a.convDC.toFixed(0), 'kW', `efficiency ${(a.effDC * 100).toFixed(1)}%`], ['800 V DC loss saving', a.convSave.toFixed(0), 'kW', `${a.convSaveMWh.toFixed(0)} MWh/yr; ${a.isDC ? 'applied' : 'not applied'}`],
+     ['Facility peak', D.fac.toFixed(0), 'kW', ''], ['Data centre maximum demand', D.md.toFixed(0), 'kVA', ''], ['Training swing', a.swingMW.toFixed(2), 'MW', `ramp ${a.rampMWs.toFixed(2)} MW/s`], ['Grid-forming BESS power', a.bessMW.toFixed(2), 'MW', `${(a.bessRed * 100).toFixed(0)}% reduction (reported ${AI_DYN.bessReduction.map(x => x * 100).join('–')}%)`], ['Grid-forming BESS energy', a.bessMWh.toFixed(2), 'MWh', `${d.bessMin} min`], ['Grid-visible swing', a.residMW.toFixed(2), 'MW', 'estimate – confirm by dynamic study']].forEach(r => L.push(r.map(q).join(',')));
+  }
   L.push(''); L.push(['TOTAL MAXIMUM DEMAND kVA', R.md.toFixed(1), 'kW', R.kw.toFixed(1), 'A', R.amps.toFixed(0)].map(q).join(','));
   return L.join('\r\n');
 }
@@ -623,13 +691,15 @@ function render(keepFocus) {
     if (el) { el.focus(); try { if (pos != null && el.setSelectionRange && el.type !== 'number') el.setSelectionRange(pos, pos); } catch (e) { } }
   }
 }
+// Picking an AI platform fills rack density, liquid share and recommended power architecture (all stay editable).
+function applyPlatform(name) { const p = aiPlatform(name); if (p.name === AI_CUSTOM || p.kw[1] == null) return; Object.assign(S.dc, { density: p.kw[1], liquid: p.liquid, arch: archName(p.arch) }); }
 function setPath(path, val) { const ks = path.split('.'); let o = S; ks.slice(0, -1).forEach(k => o = o[k]); o[ks[ks.length - 1]] = val; }
 function castVal(el) { if (el.type === 'checkbox') return el.checked; if (el.type === 'number') return el.value === '' ? '' : +el.value; return el.value; }
-const NUM_PATHS = /^(project\.(pf|spare)|mainSF|sizing\.|dc\.(area|m2rack|racks|itkw|density|upsEff|upsModule|autonomy|genKva|fuelH|txKva|pue|support)|energy\.(tariff|demand|lf|benchmark|pv|batt|shed|pfUn|pfTg))/;
+const NUM_PATHS = /^(project\.(pf|spare)|mainSF|sizing\.|dc\.(area|m2rack|racks|itkw|density|upsEff|upsModule|autonomy|genKva|fuelH|txKva|pue|support|liquid|cduKw|swing|ramp|bessRed|bessMin)|energy\.(tariff|demand|lf|benchmark|pv|batt|shed|pfUn|pfTg))/;
 let rT;
 function onEdit(e, immediate) {
   const el = e.target;
-  if (el.dataset.p) { let v = castVal(el); if (NUM_PATHS.test(el.dataset.p) && v === '') return; setPath(el.dataset.p, v); if (el.dataset.p === 'project.country') { S.project.vllOverride = ''; S.project.vlnOverride = ''; S.project.dregOverride = ''; } }
+  if (el.dataset.p) { let v = castVal(el); if (NUM_PATHS.test(el.dataset.p) && v === '') return; setPath(el.dataset.p, v); if (el.dataset.p === 'project.country') { S.project.vllOverride = ''; S.project.vlnOverride = ''; S.project.dregOverride = ''; } if (el.dataset.p === 'dc.platform') applyPlatform(v); }
   else if (el.dataset.arr) { const v = castVal(el); S[el.dataset.arr][+el.dataset.i][el.dataset.k] = el.dataset.k === 'cable' || el.dataset.k === 'ph' ? +v : v; }
   else if (el.dataset.comp) { const i = el.dataset.comp; S.compliance[i] = S.compliance[i] || {}; S.compliance[i][el.dataset.k] = el.value; }
   else return;
@@ -669,7 +739,7 @@ async function save(name, data, what) {
 }
 $('#fileIn').addEventListener('change', e => {
   const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
-  rd.onload = () => { try { const o = JSON.parse(rd.result); if (o.v !== 1 || !o.project) throw 0; S = o; persist(); render(); toast(`Opened ${o.project.name || 'project'}`); } catch (err) { toast('That file is not an Electrical Load Designer project'); } e.target.value = ''; };
+  rd.onload = () => { try { const o = JSON.parse(rd.result); if (o.v !== 1 || !o.project) throw 0; S = upgrade(o); persist(); render(); toast(`Opened ${o.project.name || 'project'}`); } catch (err) { toast('That file is not an Electrical Load Designer project'); } e.target.value = ''; };
   rd.readAsText(f);
 });
 let tT; function toast(m) { const t = $('#toast'); t.textContent = m; t.hidden = false; clearTimeout(tT); tT = setTimeout(() => t.hidden = true, 3200); }

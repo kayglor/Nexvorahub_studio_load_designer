@@ -1,0 +1,35 @@
+{
+  "version": "2026.11-1",
+  "asOf": "2026-11-05",
+  "staleMonths": 6,
+  "disclaimer": "Indicative planning values compiled from vendor announcements, trade press and preprints. They are editable defaults, not verified code or manufacturer design values. Confirm with the GPU/rack vendor and the operator before detailed design.",
+  "platforms": [
+    { "name": "Custom – enter rack density", "kw": [null, null, null], "podRacks": 8, "liquid": 0, "arch": "ac", "status": "User defined", "source": "", "url": "", "asOf": "" },
+    { "name": "NVIDIA Hopper (HGX/DGX H100/H200, 4 systems/rack)", "kw": [35, 40, 45], "podRacks": 8, "liquid": 0, "arch": "ac", "status": "Shipping", "source": "NVIDIA DGX H100 (~10.2 kW per system)", "url": "https://www.nvidia.com/en-us/data-center/dgx-h100/", "asOf": "2026-11-05" },
+    { "name": "NVIDIA GB200 NVL72", "kw": [120, 128, 132], "podRacks": 8, "liquid": 0.85, "arch": "ac", "status": "Shipping", "source": "NVIDIA GB200 NVL72 product page; trade press", "url": "https://www.nvidia.com/en-us/data-center/gb200-nvl72/", "asOf": "2026-11-05" },
+    { "name": "NVIDIA GB300 NVL72", "kw": [132, 138, 142], "podRacks": 8, "liquid": 0.85, "arch": "ac", "status": "Shipping", "source": "NVIDIA GB300 NVL72 product page; NVIDIA technical blog on GB300 power smoothing", "url": "https://www.nvidia.com/en-us/data-center/gb300-nvl72/", "asOf": "2026-11-05" },
+    { "name": "NVIDIA Vera Rubin NVL72", "kw": [190, 210, 230], "podRacks": 8, "liquid": 0.9, "arch": "ac", "status": "2026 (announced) – plan for 800 V DC readiness", "source": "NVIDIA Rubin platform page; trade press estimates", "url": "https://www.nvidia.com/en-us/data-center/technologies/rubin/", "asOf": "2026-11-05" },
+    { "name": "NVIDIA Vera Rubin NVL144 CPX (Rubin CPX)", "kw": [370, 375, 380], "podRacks": 8, "liquid": 0.9, "arch": "dc", "status": "Announced", "source": "NVIDIA Rubin CPX announcement; trade press estimates", "url": "https://nvidianews.nvidia.com/news/nvidia-unveils-rubin-cpx-a-new-class-of-gpu-designed-for-massive-context-inference", "asOf": "2026-11-05" },
+    { "name": "NVIDIA Kyber / Rubin Ultra NVL576 (planned)", "kw": [550, 600, 650], "podRacks": 8, "liquid": 0.95, "arch": "dc", "status": "Planned (2027)", "source": "NVIDIA 800 V HVDC architecture blog (Kyber rack)", "url": "https://developer.nvidia.com/blog/nvidia-800-v-hvdc-architecture-will-power-the-next-generation-of-ai-factories/", "asOf": "2026-11-05" }
+  ],
+  "architectures": {
+    "ac": { "name": "LV AC busway to rack PSUs (415/400 V class)", "dist": 0.98, "psu": 0.955, "note": "Double-conversion UPS (efficiency from the UPS input) + transformer/busway losses + rack AC→54 V PSU." },
+    "dc": { "name": "800 V DC sidecar power racks", "volts": 800, "rect": 0.975, "dist": 0.995, "psu": 0.975, "note": "Facility rectification / solid-state transformer to 800 V DC, DC busway, rack 800→54 V DC/DC. NVIDIA reports up to ~5% end-to-end efficiency gain and less copper versus 415 V AC.", "url": "https://developer.nvidia.com/blog/nvidia-800-v-hvdc-architecture-will-power-the-next-generation-of-ai-factories/", "asOf": "2026-11-05" }
+  },
+  "dynamics": {
+    "bessReduction": [0.4, 0.6],
+    "note": "Synchronous AI training produces fleet-wide power swings of tens to hundreds of MW at sub-second to second timescales. Grid-forming BESS smoothing is reported to cut the grid-visible swing by roughly 40–60%; combine with GPU power capping and software smoothing.",
+    "sources": [
+      { "source": "Power Stabilization for AI Training Datacenters (arXiv 2508.14318, preprint)", "url": "https://arxiv.org/abs/2508.14318", "asOf": "2026-11-05" },
+      { "source": "NVIDIA – How new GB300 NVL72 features provide steady power for AI", "url": "https://developer.nvidia.com/blog/how-new-gb300-nvl72-features-provide-steady-power-for-ai/", "asOf": "2026-11-05" }
+    ],
+    "mitigations": [
+      "GPU power capping / frequency locking to limit peak draw and the peak-to-valley swing.",
+      "Staggered checkpointing so the whole cluster does not idle and restart in step.",
+      "Rack-level power smoothing (energy storage in rack power shelves, ramp-rate limits) where the platform supports it.",
+      "Software power floor (keep GPUs at a minimum load during communication and checkpoint phases).",
+      "Grid-forming BESS at the point of connection to absorb the remaining oscillation and support ride-through.",
+      "Agree ramp-rate, oscillation and fault ride-through limits with the network operator early."
+    ]
+  }
+}

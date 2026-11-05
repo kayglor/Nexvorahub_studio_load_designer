@@ -6,7 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const data = fs.readFileSync(process.argv[2], 'utf8').replace(/</g, '\\u003c');
 const tpl = fs.readFileSync(path.join(__dirname, 'app.html'), 'utf8');
-const page = tpl.replace('/*DATA*/', () => data);
+// AI data centre platform library: versioned, dated, editable defaults (app/src/ai-dc-data.json)
+const aidcSrc = fs.readFileSync(path.join(__dirname, 'ai-dc-data.json'), 'utf8');
+JSON.parse(aidcSrc); // fail the build on malformed data
+const aidc = aidcSrc.replace(/</g, '\\u003c');
+const page = tpl.replace('/*DATA*/', () => data).replace('/*AIDC*/', () => aidc);
 
 const out = path.join(__dirname, '..', 'load-designer.html');
 fs.writeFileSync(out, page);
