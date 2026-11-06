@@ -235,4 +235,10 @@ view = 'drawings'; render(); lchk('drawings view shows layout', /Designing on th
 const sv2 = JSON.parse(lySave); S.dwg = sv2.dwg; S.dwgRooms = sv2.rooms; S.project.country = sv2.country; R = calcAll();
 out.layout = ly.rooms.map(r => [r.name, +r.L.toFixed(2), +r.W.toFixed(2), r.ok]);
 out.layoutChecks = lyFail.length ? lyFail : 'all passed';
+// energy intensity without an area schedule: drawing rooms' area, else "not known" (never a false pass)
+{ const zs = S.zones, rs = S.dwgRooms, dci = S.dc.include, eFail = []; S.dc.include = false;
+  S.zones = []; R = calcAll(); if (!(R.W.area > 0 && near(R.E.eui, R.E.imp / R.W.area))) eFail.push('EUI from drawing rooms got ' + R.E.eui);
+  S.dwgRooms = []; R = calcAll(); const ec = CHECKS.find(c => /Energy metering/.test(c[0]))[2](R); if (isFinite(R.E.eui) || ec[1] !== 'na' || !/not known/.test(ec[0])) eFail.push('no area got ' + JSON.stringify([R.E.eui, ec]));
+  view = 'energy'; render(); if (/NaN/.test(document.querySelector('#main').innerHTML + reportDoc())) eFail.push('NaN shown');
+  S.zones = zs; S.dwgRooms = rs; S.dc.include = dci; R = calcAll(); out.energyAreaChecks = eFail.length ? eFail : 'all passed'; }
 for (const [k, v] of Object.entries(out)) console.log(k, '=', JSON.stringify(v));

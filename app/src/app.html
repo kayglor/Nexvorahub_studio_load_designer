@@ -936,7 +936,8 @@ function calcAll() {
   if (room) { room.A = room.L * room.W; room.swL = (Math.ceil(z.ways / 4) + nTx + (nTx > 1 ? 1 : 0)) * 0.8; room.swA = (room.swL + 1.6) * (1.0 + 1.5 + 0.8); room.vent = room.loss / (1.2 * 1.005 * 10); }
   const C = S.circuits.map(k => calcCircuit(k, X));
   const W = calcDwg(X), RV = calcReview(X);
-  const E = calcEnergy(X, md, kw, Z.area + (D ? D.white : 0));
+  // floor area for energy intensity: area schedule (+ data hall); if there is none, the rooms on the electrical drawing
+  const E = calcEnergy(X, md, kw, (Z.area + (D ? D.white : 0)) || W.area || 0);
   return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, W, RV, E };
 }
 function calcEnergy(X, md, kw, area) {
@@ -952,7 +953,7 @@ function calcEnergy(X, md, kw, area) {
   const pvGen = e.pv * yld, pvUse = Math.min(net, pvGen * 0.9), imp = Math.max(0, net - pvUse);
   const mdAfter = Math.max(0, md * (1 - e.shed) - e.batt / X.pf);
   const q = e.pfUn >= e.pfTg ? 0 : kw * (Math.tan(Math.acos(e.pfUn)) - Math.tan(Math.acos(e.pfTg)));
-  return { base, savKwh, sav, net, pvGen, pvUse, imp, co2, yld, eui: area ? imp / area : 0, cost: imp * e.tariff + mdAfter * e.demand * 12, costSave: (base - imp) * e.tariff + (md - mdAfter) * e.demand * 12, tco2: imp * co2 / 1000, mdAfter, q, bank: Math.ceil(q / 25) * 25, area };
+  return { base, savKwh, sav, net, pvGen, pvUse, imp, co2, yld, eui: area ? imp / area : NaN, cost: imp * e.tariff + mdAfter * e.demand * 12, costSave: (base - imp) * e.tariff + (md - mdAfter) * e.demand * 12, tco2: imp * co2 / 1000, mdAfter, q, bank: Math.ceil(q / 25) * 25, area };
 }
 
 /* ---------- compliance ---------- */
@@ -973,7 +974,7 @@ const CHECKS = [
   ['Transformer and switchgear ratings', ['EN 60076; EN 61439-2', 'NEC Art. 450; UL 891', 'CEC Section 26', 'AS 60076; AS/NZS 61439'], R => R.txKva ? [`${R.nTx} × ${f0(R.txKva)} kVA, incomer ${f0(R.incomer)} A, Icw ${R.icw ?? '> 120'} kA`, 'ok'] : ['Rating exceeds standard sizes – add transformers', 'bad']],
   ['Substation / switchroom space and ventilation', ['729; ENA TS 41-24', 'NEC 110.26; 450.21', 'CEC Rules 2-308, 26-240', 'AS 2067; AS/NZS 3000 Cl. 2.10'], R => R.room ? [`${f1(R.room.A + R.room.swA)} m²; ventilation ${f2(R.room.vent)} m³/s`, 'na'] : ['–', 'na']],
   ['Data centre resilience (where applicable)', ['EN 50600-2-2; Uptime Tier Standard', 'TIA-942-B; NEC Art. 645; NFPA 75', 'TIA-942-B', 'TIA-942-B; AS/NZS 3000'], R => R.D ? [`${R.D.t[0]}; IT ${f0(R.D.it)} kW; peak PUE ${f2(R.D.pueP)}`, 'na'] : ['No data hall included', 'na']],
-  ['Energy metering and management', ['Part L; ISO 50001; ISO 52120-1', 'ASHRAE 90.1 §8.4.3 (confirm edition)', 'NECB (confirm edition)', 'NCC Section J'], R => [`${f0(R.E.eui)} kWh/m²/yr net vs ${S.energy.benchmark} benchmark`, R.E.eui <= S.energy.benchmark ? 'ok' : 'warn']],
+  ['Energy metering and management', ['Part L; ISO 50001; ISO 52120-1', 'ASHRAE 90.1 §8.4.3 (confirm edition)', 'NECB (confirm edition)', 'NCC Section J'], R => isFinite(R.E.eui) ? [`${f0(R.E.eui)} kWh/m²/yr net vs ${S.energy.benchmark} benchmark`, R.E.eui <= S.energy.benchmark ? 'ok' : 'warn'] : ['Floor area not known – enter an area schedule to compare with the benchmark', 'na']],
   ['Inspection, testing and certification', ['BS 7671 Part 6', 'AHJ inspection; NEC 90.4', 'CEC Rule 2-004', 'AS/NZS 3000 Section 8; AS/NZS 3017'], () => ['Required at completion', 'na']],
 ];
 function cfail(R, key, extra = '') { const n = R.C.filter(c => c.fail === key).length, rv = R.C.filter(c => c.fail === 'REVIEW').length; return [`${n} circuit(s) failing${rv ? `, ${rv} to review` : ''}${extra}`, n ? 'bad' : rv ? 'warn' : 'ok']; }
@@ -1157,7 +1158,7 @@ V.energy = () => {
   return `<section class="sheet">${head('Stage 8', 'Energy management', 'Annual energy from demand × load factor, reduced by the measures you select, then offset by solar PV. Carbon factor and PV yield default to the region.')}
   <div class="split"><div><h3>Inputs</h3><div class="grid">${fld('Currency', inp('energy.currency', e.currency))}${fld('Tariff per kWh', inp('energy.tariff', e.tariff, 'number'))}${fld('Capacity charge per kVA/month', inp('energy.demand', e.demand, 'number'))}${fld('Annual load factor', inp('energy.lf', e.lf, 'number'), 'Offices 0.35–0.45')}${fld('EUI benchmark kWh/m²/yr', inp('energy.benchmark', e.benchmark, 'number'))}${fld('Grid carbon kgCO₂e/kWh', inp('energy.co2', e.co2, 'number', `placeholder="${E.co2}"`))}${fld('PV yield kWh/kWp/yr', inp('energy.pvYield', e.pvYield, 'number', `placeholder="${E.yld}"`))}${fld('Solar PV kWp', inp('energy.pv', e.pv, 'number'))}${fld('Battery kW (peak shaving)', inp('energy.batt', e.batt, 'number'))}${fld('Load shedding share of MD', inp('energy.shed', e.shed, 'number'))}${fld('Uncorrected PF', inp('energy.pfUn', e.pfUn, 'number'))}${fld('Target PF', inp('energy.pfTg', e.pfTg, 'number'))}</div>
    <h3>Measures</h3>${ms.map(([k, l, h]) => `<label class="row" style="gap:8px;margin:4px 0"><input type="checkbox" style="width:auto" id="m_${k}" data-p="energy.m.${k}" ${e.m[k] ? 'checked' : ''}> ${l} <span class="note">${h}</span></label>`).join('')}</div>
-  <div><h3>Results</h3><div class="kpis">${[['Baseline', `${f0(E.base / 1000)} MWh/yr`], ['Savings', `${f0(E.savKwh / 1000)} MWh/yr`, pct(E.base ? E.savKwh / E.base : 0)], ['PV used', `${f0(E.pvUse / 1000)} MWh/yr`], ['Grid import', `${f0(E.imp / 1000)} MWh/yr`], ['Net EUI', `${f0(E.eui)} kWh/m²`, E.eui <= e.benchmark ? 'within benchmark' : 'above benchmark'], ['Annual cost', `${esc(e.currency)} ${f0(E.cost)}`, `saving ${f0(E.costSave)}`], ['Carbon', `${f1(E.tco2)} tCO₂e/yr`], ['MD after management', `${f0(E.mdAfter)} kVA`, `from ${f0(R.md)} kVA`], ['PF correction', `${f0(E.bank)} kVAr`, `needs ${f0(E.q)} kVAr`]].map(([a, b, c]) => `<div class="kpi"><span>${a}</span><b>${b}</b>${c ? `<small>${c}</small>` : ''}</div>`).join('')}</div>
+  <div><h3>Results</h3><div class="kpis">${[['Baseline', `${f0(E.base / 1000)} MWh/yr`], ['Savings', `${f0(E.savKwh / 1000)} MWh/yr`, pct(E.base ? E.savKwh / E.base : 0)], ['PV used', `${f0(E.pvUse / 1000)} MWh/yr`], ['Grid import', `${f0(E.imp / 1000)} MWh/yr`], ['Net EUI', `${f0(E.eui)} kWh/m²`, !isFinite(E.eui) ? 'floor area not known' : E.eui <= e.benchmark ? 'within benchmark' : 'above benchmark'], ['Annual cost', `${esc(e.currency)} ${f0(E.cost)}`, `saving ${f0(E.costSave)}`], ['Carbon', `${f1(E.tco2)} tCO₂e/yr`], ['MD after management', `${f0(E.mdAfter)} kVA`, `from ${f0(R.md)} kVA`], ['PF correction', `${f0(E.bank)} kVAr`, `needs ${f0(E.q)} kVAr`]].map(([a, b, c]) => `<div class="kpi"><span>${a}</span><b>${b}</b>${c ? `<small>${c}</small>` : ''}</div>`).join('')}</div>
    <p class="note">End-use split: lighting ${pct(e.shares.lighting)}, HVAC ${pct(e.shares.hvac)}, pumps & fans ${pct(e.shares.pumps)}, other ${pct(e.shares.other)}. Floor area ${f0(E.area)} m².</p></div></div></section>`;
 };
 V.compliance = () => {
