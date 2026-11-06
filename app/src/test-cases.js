@@ -89,7 +89,17 @@ dchk('lumen method meeting/corridor/WC/tea', meet.nLum === 8 && corr.nLum === 6 
 dchk('socket guidance', off.nSock === 30 && meet.nSock === 3 && corr.nSock === 1 && wc.nSock === 0 && tea.nSock === 4, W.rooms.map(o => o.nSock));
 dchk('emergency counts', off.nEm === 2 && meet.nEm === 0 && corr.nEm === 2 && wc.nEm === 1 && tea.nEm === 1, W.rooms.map(o => o.nEm));
 const LC = W.C.filter(c => c.kind === 'L'), PC = W.C.filter(c => c.kind === 'P');
-dchk('lighting circuits within 80% of 6 A', LC.length === 3 && LC.every(c => c.w <= 0.8 * 6 * 230 * 0.9 + 1e-6) && LC.reduce((a, c) => a + c.pts, 0) === 79 + 8 + 6 + 6 + 5 + 6, LC.map(c => [c.pts, Math.round(c.w)]));
+dchk('lighting circuits within 80% of 6 A and 20 points (UK practice)', LC.length === 6 && LC.every(c => c.w <= 0.8 * 6 * 230 * 0.9 + 1e-6 && c.pts <= 20) && LC.reduce((a, c) => a + c.pts, 0) === 79 + 8 + 6 + 6 + 5 + 6, LC.map(c => [c.pts, Math.round(c.w)]));
+dchk('UK has no numeric rule – practice default stated', W.lightPts === 20 && !W.lpRule && /Design practice/.test(W.lpRef) && findChk(W, 'Lighting points per circuit', 'ok').length === 6, W.lpRef);
+// regional lighting-point rules
+const lpCase = (country, user) => { S.project.country = country; S.dwg.maxLightPts = user ?? ''; R = calcAll(); return R.W; };
+let LW = lpCase('France'); dchk('France NF C 15-100: 8 points', LW.lightPts === 8 && LW.C.filter(c => c.kind === 'L').every(c => c.pts <= 8) && /NF C 15-100/.test(LW.lpRef));
+LW = lpCase('Spain'); dchk('Spain ITC-BT-25: 30 points', LW.lightPts === 30 && LW.C.filter(c => c.kind === 'L').every(c => c.pts <= 30) && /ITC-BT-25/.test(LW.lpRef));
+LW = lpCase('India'); dchk('India IS 732: 10 points and 800 W', LW.lightPts === 10 && LW.C.filter(c => c.kind === 'L').every(c => c.pts <= 10 && c.w <= 800 + 1e-6) && /IS 732/.test(LW.lpRef));
+LW = lpCase('Canada'); dchk('Canada CEC 8-304: 12 outlets', LW.lightPts === 12 && LW.C.filter(c => c.kind === 'L').every(c => c.pts <= 12) && /8-304/.test(LW.lpRef));
+LW = lpCase('United States'); dchk('US NEC: load-based, practice default', LW.lightPts === 20 && /no numeric limit/.test(LW.lpRef));
+LW = lpCase('United Kingdom', 12); dchk('user limit applies', LW.lightPts === 12 && LW.C.filter(c => c.kind === 'L').every(c => c.pts <= 12) && /Your limit/.test(LW.lpRef));
+LW = lpCase('United Kingdom'); R = calcAll();
 dchk('every luminaire circuited', W.rooms.every(o => o.lc.reduce((a, x) => a + x[1], 0) === o.nLum + o.nEm) && W.rooms.every(o => o.pc.reduce((a, x) => a + x[1], 0) === o.nSock));
 dchk('rings ≤ 100 m²', PC.length === 4 && PC.every(c => c.area <= 100 + 1e-6 && c.cc.ring && c.cc.inr === 32 && c.cc.csa === 2.5), PC.map(c => [Math.round(c.area), c.pts]));
 const Lr1 = 2 * 10 + 2 * 35 * (10 / 30);
@@ -103,7 +113,7 @@ S.dwg.rcd = true; S.dwgRooms[0].nLum = 40; R = calcAll(); dchk('too few luminair
 S.dwgRooms[0].nLum = ''; S.dwgRooms[3].type = 'Bathroom / shower'; S.dwgRooms[3].nSock = 1; R = calcAll(); dchk('bathroom socket warns', findChk(R.W, 'Socket-outlets in bathroom', 'warn').length === 1);
 S.dwgRooms[3].type = 'Toilets / WC'; S.dwgRooms[3].nSock = ''; S.dwgRooms[2].nEm = 0; R = calcAll(); dchk('missing emergency fails', R.W.chk.some(c => c.scope === corr.r.name && c.item === 'Emergency lighting' && c.st === 'bad'));
 S.dwgRooms[2].nEm = ''; S.dwgRooms[1].L = 0; R = calcAll(); dchk('zero dimension fails', findChk(R.W, 'Room dimensions', 'bad').length === 1);
-S.dwgRooms[1].L = 6; S.dwg.ways = 8; R = calcAll(); dchk('few ways warns', findChk(R.W, 'Distribution board ways', 'warn').length === 1, R.W.C.length);
+S.dwgRooms[1].L = 6; S.dwg.ways = 12; R = calcAll(); dchk('few ways warns', findChk(R.W, 'Distribution board ways', 'warn').length === 1, R.W.C.length);
 S.dwg.ways = 24; S.dwg.uf = 1.2; R = calcAll(); dchk('UF out of range fails', findChk(R.W, 'Utilisation factor', 'bad').length === 1);
 S.dwg.uf = 0.6; S.dwg.sockType = 'Schuko CEE 7/3 16 A (Type F)'; R = calcAll(); dchk('socket mismatch warns', findChk(R.W, 'Socket-outlet system matches region', 'warn').length === 1 && R.W.C.filter(c => c.kind === 'P').every(c => c.pts <= 8 && c.cc.inr === 16));
 S.dwg.sockType = '';

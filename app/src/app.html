@@ -202,7 +202,7 @@ function exampleProject() {
     ],
     energy: { currency: 'GBP', tariff: 0.25, demand: 3, lf: 0.4, benchmark: 95, co2: '', pvYield: '', pv: 100, batt: 50, shed: 0.05, pfUn: 0.85, pfTg: 0.95, shares: { lighting: 0.2, hvac: 0.4, pumps: 0.15, other: 0.25 }, m: { led: true, pir: true, bms: true, hrv: false, vsd: true, mt: true } },
     compliance: {},
-    dwg: { board: 'DB-L1', ways: 24, sockType: '', sockCircuit: '', maxPts: '', vaSock: '', lightIn: '', lightFill: 0.8, uf: 0.6, mf: 0.8, rcd: true, afdd: false, cable: 0, grp: 1, zdb: '' },
+    dwg: { board: 'DB-L1', ways: 24, sockType: '', sockCircuit: '', maxPts: '', vaSock: '', lightIn: '', maxLightPts: '', lightFill: 0.8, uf: 0.6, mf: 0.8, rcd: true, afdd: false, cable: 0, grp: 1, zdb: '' },
     review: { sheets: [], map: {}, areas: {}, vaSock: '' },
     dwgRooms: [
       { id: uid(), name: 'L1 open-plan office', type: 'Office – open plan', L: 20, W: 15, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 10 },
@@ -421,6 +421,16 @@ const SOCK_BY_COUNTRY = (() => {
   return m;
 })();
 function regionalSocket(X) { const i = SOCK_BY_COUNTRY[X.c.name]; return SOCK[i ?? { NEC: 13, CEC: 14, ASNZS: 12 }[X.fam] ?? 1]; }
+// Lighting points per final circuit where the wiring code sets a limit (editable defaults – confirm the edition in force).
+// Where the code has no numeric limit the app applies a design-practice default and says so.
+const LIGHT_PTS_RULES = {
+  France: { pts: 8, ref: 'NF C 15-100 (dwellings): max 8 lighting points per circuit' },
+  Spain: { pts: 30, ref: 'REBT ITC-BT-25 circuit C1: max 30 lighting points' },
+  India: { pts: 10, w: 800, ref: 'IS 732 / NBC 2016: max 10 points and 800 W per final sub-circuit' },
+  CEC: { pts: 12, ref: 'CEC Rule 8-304: max 12 outlets on a 2-wire branch circuit' },
+};
+const LIGHT_PTS_PRACTICE = 20;
+function lightPtsRule(X) { return LIGHT_PTS_RULES[X.c.name] || (X.fam === 'CEC' ? LIGHT_PTS_RULES.CEC : null); }
 const RING_OPTS = [['Ring final 32 A (≤ 100 m²)', 32, 100], ['Radial 32 A (≤ 75 m²)', 32, 75], ['Radial 20 A (≤ 50 m²)', 20, 50]];
 const isBlank = v => v === '' || v == null || !isFinite(+v);
 const dwgRoomType = n => DWG_ROOMS.find(t => t.n === n) || DWG_ROOMS[0];
@@ -448,14 +458,17 @@ function calcDwg(X) {
     return { r, i, t, lum, L, W, A, lux, nAuto, nLum, sAuto, nSock, emNeed, emAuto, nEm, Eavg, wl, lpd: A ? nLum * lum.w / A : 0, dist: isBlank(r.dist) ? 15 : +r.dist, lc: [], pc: [] };
   });
   // ---- lighting circuits: pack luminaires (incl. emergency) up to fill × In ----
-  const circ = [], pfL = 0.9, wMax = fill * lightIn * vln * pfL;
+  const lpRule = lightPtsRule(X), lpUser = !isBlank(g.maxLightPts) && +g.maxLightPts > 0;
+  const lightPts = lpUser ? Math.floor(+g.maxLightPts) : lpRule ? lpRule.pts : LIGHT_PTS_PRACTICE;
+  const lpRef = lpUser ? 'Your limit' + (lpRule ? ' (code: ' + lpRule.ref + ')' : '') : lpRule ? lpRule.ref : `Design practice – ${FAMILY_NAME[X.fam] || 'this code'} sets no numeric limit`;
+  const circ = [], pfL = 0.9, wMax = Math.min(fill * lightIn * vln * pfL, lpRule && lpRule.w ? lpRule.w : Infinity);
   let cur = null;
   const newL = () => { cur = { ref: 'L' + (circ.filter(c => c.kind === 'L').length + 1), kind: 'L', w: 0, pts: 0, rooms: [], len: 0 }; circ.push(cur); };
   R0.forEach(o => {
     const per = o.nLum + o.nEm ? o.wl / (o.nLum + o.nEm) : 0; let left = o.nLum + o.nEm;
     while (left > 0) {
-      if (!cur || cur.w + per > wMax + 1e-9) newL();
-      const fit = Math.max(1, Math.min(left, Math.floor((wMax - cur.w) / (per || 1)) || 1));
+      if (!cur || cur.w + per > wMax + 1e-9 || cur.pts >= lightPts) newL();
+      const fit = Math.max(1, Math.min(left, lightPts - cur.pts, Math.floor((wMax - cur.w) / (per || 1)) || 1));
       cur.w += fit * per; cur.pts += fit; left -= fit; o.lc.push([cur.ref, fit]);
       if (!cur.rooms.includes(o)) { cur.rooms.push(o); }
     }
@@ -520,6 +533,7 @@ function calcDwg(X) {
   });
   C.forEach(c => {
     const st = c.cc.fail === 'REVIEW' ? 'warn' : c.cc.fail ? 'bad' : 'ok';
+    if (c.kind === 'L') add(c.ref, 'Lighting points per circuit', `${c.pts} of ${lightPts} max${lpRule && lpRule.w ? `; ${f0(c.w)} W of ${lpRule.w} W` : ''}`, c.pts <= lightPts && (!lpRule || !lpRule.w || c.w <= lpRule.w + 1e-6) ? 'ok' : 'bad', lpRef);
     add(c.ref, c.kind === 'L' ? 'Lighting circuit' : 'Socket circuit', `${c.pts} pts, Ib ${f1(c.ib)} A, In ${c.cc.inr} A, ${c.cc.csa ?? '–'} mm², VD ${c.cc.vd != null ? f2(c.cc.vd) : '–'}%, Zs ${c.cc.zs != null ? f2(c.cc.zs) : '–'} Ω – ${c.cc.status || 'review'}`, st, c.cc.ring ? 'BS 7671 App. 15; 525; 411.4' : 'Ib ≤ In ≤ Iz; voltage drop; Zs (reg. 433, 525, 411)');
     if (c.kind === 'P' && !c.rcd && X.fam !== 'NEC') add(c.ref, 'Additional protection by 30 mA RCD', 'No RCD on socket circuit', 'bad', { IEC: 'BS 7671 411.3.3 / IEC 60364-4-41', CEC: 'CEC Rule 26-704', ASNZS: 'AS/NZS 3000 Cl. 2.6.3' }[X.fam]);
     if (c.kind === 'P' && X.fam === 'NEC' && c.rooms.some(o => o.t.wet) && !c.rcd) add(c.ref, 'GFCI protection', 'Wet / kitchen location without GFCI', 'bad', 'NEC 210.8');
@@ -531,7 +545,7 @@ function calcDwg(X) {
   add(g.board || 'Board', 'Distribution board ways', `${used} circuits used of ${ways} ways (${ways ? pct(1 - used / ways) : '–'} spare)`, ways && used <= ways ? (1 - used / ways >= 0.2 ? 'ok' : 'warn') : 'bad', 'Allow ≥ 20% spare ways');
   const cnt = s => chk.filter(c => c.st === s).length;
   const lightW = R0.reduce((a, o) => a + o.wl, 0), sockN = R0.reduce((a, o) => a + o.nSock, 0), area = R0.reduce((a, o) => a + o.A, 0);
-  return { rooms: R0, C, chk, sock, sockDef, ringOpt, ptsLim, lightIn, vaSock, uf, mf, rcdAll, area, lightW, sockN, sockVA: sockN * vaSock, nOk: cnt('ok'), nWarn: cnt('warn'), nBad: cnt('bad') };
+  return { lightPts, lpRef, lpRule, rooms: R0, C, chk, sock, sockDef, ringOpt, ptsLim, lightIn, vaSock, uf, mf, rcdAll, area, lightW, sockN, sockVA: sockN * vaSock, nOk: cnt('ok'), nWarn: cnt('warn'), nBad: cnt('bad') };
 }
 
 /* drawing geometry (mm) → DXF R12 and SVG */
@@ -1174,6 +1188,7 @@ V.drawings = () => {
    ${W.sock.ring ? fld('Socket circuit arrangement', sel('dwg.sockCircuit', RING_OPTS.map(o => o[0]), W.ringOpt[0]), 'BS 7671 Appendix 15 standard circuits') : fld('Max outlets per circuit', inp('dwg.maxPts', g.maxPts, 'number', `placeholder="${W.ptsLim}"`), `Default ${W.ptsLim} · ${esc(W.sock.ref)}`)}
    ${fld('Design load per socket (VA)', inp('dwg.vaSock', g.vaSock, 'number', `placeholder="${W.vaSock}"`), X.fam === 'NEC' ? 'NEC 220.14(I): 180 VA per yoke' : 'Diversified, for circuit current')}
    ${fld('Lighting circuit rating (A)', inp('dwg.lightIn', g.lightIn, 'number', `placeholder="${W.lightIn}"`), 'Regional default when blank')}
+   ${fld('Max lighting points per circuit', inp('dwg.maxLightPts', g.maxLightPts, 'number', `placeholder="${W.lightPts}"`), esc(W.lpRef))}
    ${fld('Lighting circuit max loading', inp('dwg.lightFill', g.lightFill, 'number'), '0.8 = 80% of In (NEC continuous-load rule)')}
    ${fld('Utilisation factor', inp('dwg.uf', g.uf, 'number'), '0.4–0.75')}${fld('Maintenance factor', inp('dwg.mf', g.mf, 'number'), '0.7–0.9')}
    ${fld('Cable table', sel('dwg.cable', DD.COMBOS.map((c, i) => ({ v: i, t: c.n })), g.cable), 'BS 7671 Appendix 4 ratings')}
