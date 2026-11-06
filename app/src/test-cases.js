@@ -186,4 +186,43 @@ S.review = JSON.parse(rvSave); R = calcAll();
 view = 'review'; render(); rchk('empty review view', /No drawings imported yet/.test(document.querySelector('#main').innerHTML));
 out.review = [shT.legend.length, shT.rooms.map(r => [r.name, Math.round(r.area)]), Object.fromEntries(Object.entries(shT.blocks).map(([k, v]) => [k, v.n]))];
 out.reviewChecks = rvFail.length ? rvFail : 'all passed';
+
+// ---- design on a submitted layout: rooms from walls, overlay DXF in the drawing's own coordinates ----
+const lyFail = [], lchk = (name, ok, got) => { if (!ok) lyFail.push(name + (got !== undefined ? ' got ' + JSON.stringify(got) : '')); };
+const lySave = JSON.stringify({ dwg: S.dwg, rooms: S.dwgRooms, country: S.project.country });
+// Plan (mm): OFFICE 6 × 4 m at (1000,1000) and CORRIDOR 6 × 2 m above it; door gap in the shared wall; windows on the south façade.
+const lyDXF = (k = 1, units = 4) => {
+  const o = [], p = (c, v) => o.push(String(c), String(v)), Ln = (x1, y1, x2, y2, ly = 'A-WALL') => { p(0, 'LINE'); p(8, ly); p(10, x1 * k); p(20, y1 * k); p(30, 0); p(11, x2 * k); p(21, y2 * k); p(31, 0); };
+  p(0, 'SECTION'); p(2, 'HEADER'); p(9, '$INSUNITS'); p(70, units); p(0, 'ENDSEC'); p(0, 'SECTION'); p(2, 'ENTITIES');
+  Ln(1000, 1000, 2500, 1000); Ln(2500, 1000, 5500, 1000, 'A-WINDOW'); Ln(5500, 1000, 7000, 1000); // south: wall + window + wall
+  Ln(7000, 1000, 7000, 7000); Ln(1000, 1000, 1000, 7000); Ln(1000, 7000, 7000, 7000); // east, west, north
+  Ln(1000, 5000, 3000, 5000); Ln(3900, 5000, 7000, 5000); // shared wall with a 0.9 m door gap
+  p(0, 'TEXT'); p(8, 'A-TEXT'); p(10, 3500 * k); p(20, 3000 * k); p(30, 0); p(40, 200 * k); p(1, 'OFFICE');
+  p(0, 'TEXT'); p(8, 'A-TEXT'); p(10, 3200 * k); p(20, 6000 * k); p(30, 0); p(40, 200 * k); p(1, 'CORRIDOR');
+  p(0, 'ENDSEC'); p(0, 'EOF'); return o.join('\r\n');
+};
+const pl = parseDXF(lyDXF());
+lchk('LINE entities read', pl.ents.filter(e => e.type === 'LINE').length === 8 && pl.ents.find(e => e.type === 'LINE').x2 === 2500);
+const ly = detectLayout(pl.ents, pl.units, 'plan.dxf'), lo = ly.rooms.find(r => r.name === 'OFFICE'), lc = ly.rooms.find(r => r.name === 'CORRIDOR');
+lchk('rooms sized from walls', ly.rooms.length === 2 && lo.ok && lc.ok && near(lo.L, 6, 1e-3) && near(lo.W, 4, 1e-3) && near(lc.L, 6, 1e-3) && near(lc.W, 2, 1e-3) && near(lo.x0, 1000) && near(lo.y0, 1000) && near(lc.y0, 5000), ly.rooms);
+lchk('room types from labels', lo.type === 'Office – cellular' && lc.type === 'Corridor / circulation');
+S.project.country = 'United Kingdom'; applyLayout(ly); R = calcAll();
+lchk('applied as generator rooms', S.dwgRooms.length === 2 && S.dwgRooms[0].ox === lo.x0 && R.W.rooms.every(o => o.A > 0) && !R.W.chk.some(c => c.item === 'Room size from layout'));
+let LG = toDXF(dwgGeom(R.W)), Gm = dwgGeom(R.W);
+const fit = Gm.P.filter(q => q.t === 'C' && q.ly === 'E-LIGHT' && q.y > 500); // plan area only (legend samples sit below)
+const inside = (q, r) => q.x > r.x0 && q.x < r.x0 + r.L * 1000 && q.y > r.y0 && q.y < r.y0 + r.W * 1000;
+lchk('overlay fittings inside real rooms', Gm.overlay && fit.length > 0 && fit.every(q => inside(q, lo) || inside(q, lc)), fit.slice(0, 3));
+lchk('architecture kept out of the DXF', !/X-ARCH/.test(LG) && Gm.P.some(q => q.ly === 'X-ARCH'));
+lchk('schedule placed below the layout', Gm.P.filter(q => q.ly === 'E-TABLE').every(q => (q.y1 ?? q.y) < 1000));
+// same plan drawn in metres: rooms identical, geometry scaled into metres
+const plm = parseDXF(lyDXF(0.001, 6)), lym = detectLayout(plm.ents, plm.units, 'plan-m.dxf'), lom = lym.rooms.find(r => r.name === 'OFFICE');
+lchk('metre drawing', lym.uM === 1 && near(lom.L, 6, 1e-3) && near(lom.x0, 1, 1e-6), lom);
+applyLayout(lym); R = calcAll(); const Gmm = dwgGeom(R.W), fm = Gmm.P.filter(q => q.t === 'C' && q.ly === 'E-LIGHT' && q.y > 0.5);
+lchk('metre overlay scaled', fm.every(q => q.x > 0.9 && q.x < 7.1 && q.y > 0.9 && q.y < 7.1 && q.r < 1) && Gmm.P.filter(q => q.t === 'T').every(q => q.h < 1), fm.slice(0, 2));
+const fail = detectLayout(parseDXF(lyDXF().replace(/A-WALL/g, 'NOTES').replace(/A-WINDOW/g, 'NOTES')).ents, 4, 'x.dxf');
+lchk('falls back to all lines when no wall layer', fail.wallMode === 'all lines' && fail.rooms.every(r => r.ok));
+view = 'drawings'; render(); lchk('drawings view shows layout', /Designing on the layout/.test(document.querySelector('#main').innerHTML));
+const sv2 = JSON.parse(lySave); S.dwg = sv2.dwg; S.dwgRooms = sv2.rooms; S.project.country = sv2.country; R = calcAll();
+out.layout = ly.rooms.map(r => [r.name, +r.L.toFixed(2), +r.W.toFixed(2), r.ok]);
+out.layoutChecks = lyFail.length ? lyFail : 'all passed';
 for (const [k, v] of Object.entries(out)) console.log(k, '=', JSON.stringify(v));
