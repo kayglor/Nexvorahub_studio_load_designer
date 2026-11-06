@@ -247,6 +247,7 @@ function exampleProject() {
     energy: { currency: 'GBP', tariff: 0.25, demand: 3, lf: 0.4, benchmark: 95, co2: '', pvYield: '', pv: 100, batt: 50, shed: 0.05, pfUn: 0.85, pfTg: 0.95, shares: { lighting: 0.2, hvac: 0.4, pumps: 0.15, other: 0.25 }, m: { led: true, pir: true, bms: true, hrv: false, vsd: true, mt: true } },
     compliance: {},
     dwg: { board: 'DB-L1', ways: 24, sockType: '', sockCircuit: '', maxPts: '', vaSock: '', lightIn: '', lightFill: 0.8, uf: 0.6, mf: 0.8, rcd: true, afdd: false, cable: 0, grp: 1, zdb: '' },
+    review: { sheets: [], map: {}, areas: {}, vaSock: '' },
     dwgRooms: [
       { id: uid(), name: 'L1 open-plan office', type: 'Office – open plan', L: 20, W: 15, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 10 },
       { id: uid(), name: 'L1 meeting room', type: 'Meeting room', L: 6, W: 5, lum: '', lux: '', nLum: '', nSock: '', nEm: '', dist: 8 },
@@ -260,7 +261,7 @@ let S;
 try { S = JSON.parse(localStorage.getItem(STORE_KEY)) || null; } catch (e) { S = null; }
 if (!S || S.v !== 1) S = exampleProject();
 // Projects saved before the AI data centre fields existed: fill in the new defaults.
-function upgrade(o) { const ex = exampleProject(); o.dc = Object.assign({}, ex.dc, o.dc || {}); o.dwg = Object.assign({}, ex.dwg, o.dwg || {}); if (!Array.isArray(o.dwgRooms)) o.dwgRooms = []; return o; }
+function upgrade(o) { const ex = exampleProject(); o.dc = Object.assign({}, ex.dc, o.dc || {}); o.dwg = Object.assign({}, ex.dwg, o.dwg || {}); o.review = Object.assign({ sheets: [], map: {}, areas: {}, vaSock: '' }, o.review || {}); if (!Array.isArray(o.dwgRooms)) o.dwgRooms = []; return o; }
 upgrade(S);
 let saveT;
 function persist() { clearTimeout(saveT); saveT = setTimeout(() => { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) { } }, 300); }
@@ -662,6 +663,198 @@ function toSVG(G, standalone) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${r(x0)} ${r(-y1)} ${r(w)} ${r(h)}"${standalone ? ` width="${r(w / 50)}" height="${r(h / 50)}" style="background:#fff;color:#1b1f1d"` : ' class="dwg"'} stroke-width="${r(Math.max(w, h) / 1500) || 20}" font-family="Arial, sans-serif">${body}</svg>`;
 }
 
+/* ---------- drawing review: DXF import, legend learning, counts by room, pre-checks ---------- */
+const RV_TYPES = ['Luminaire', 'Emergency luminaire', 'Exit sign', 'Switch', 'Socket', 'Socket – UPS', 'Socket – emergency', 'Floor box', 'Distribution board', 'Ignore', 'Unclassified'];
+const rvLight = t => t === 'Luminaire' || t === 'Emergency luminaire' || t === 'Exit sign';
+const rvSock = t => /^Socket|^Floor box/.test(t);
+const RV_ROOM_WORDS = 'OFFICE|KITCHEN|KITCHENETTE|PANTRY|STORE|STORAGE|W\\.?C\\.?|WC|TOILETS?|BATH(ROOM)?|SHOWER|MEETING( ROOM)?|CONFERENCE( ROOM)?|BOARD ?ROOM|CORRIDOR|ENTRANCE|ENTERANCE|LOBBY|RECEPTION|HALL|STAIRS?|STAIRCASE|BEDROOM|LIVING( ROOM)?|DINING|LOUNGE|CLASSROOM|LAB(ORATORY)?|SERVER( ROOM)?|PLANT( ROOM)?|ELECTRICAL ROOM|ELEC\\.? ROOM|AUX\\.? TRANSFORMER|TRANSFORMER|ROOM|GARAGE|PRAYER( ROOM)?|MANAGER|ARCHIVE|SECURITY|LAUNDRY|CLEANER|JANITOR|GYM|LIBRARY|WORKSHOP|WAREHOUSE|CAFE|CAFETERIA|RESTAURANT|SHOP|RETAIL';
+const rvEscape = n => /CORRIDOR|STAIR|ENTRANCE|ENTERANCE|LOBBY|EXIT|HALL/i.test(n);
+const rvWet = n => /W\.?C|TOILET|BATH|SHOWER/i.test(n);
+const DXF_UNIT_M2 = { 1: 0.00064516, 2: 0.09290304, 4: 1e-6, 5: 1e-4, 6: 1 };
+
+function dxfClean(s) {
+  return String(s ?? '').replace(/\\U\+([0-9A-Fa-f]{4})/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/%%[uUoOkK]/g, '').replace(/%%[dD]/g, '°').replace(/%%[cC]/g, 'Ø').replace(/%%[pP]/g, '±').replace(/%%%/g, '%')
+    .replace(/\\[Pp]/g, ' ').replace(/\\S([^;^]*)\^([^;]*);/g, '$1/$2').replace(/\\[ACcFfHhQqTtWw][^;\\]*;/g, '').replace(/\\[LlOoKk~]/g, '')
+    .replace(/[{}]/g, '').replace(/\\\\/g, '\\').replace(/\s+/g, ' ').trim();
+}
+// Minimal ASCII DXF reader: model-space INSERT (with ATTRIBs), TEXT/MTEXT, LWPOLYLINE/POLYLINE and the $INSUNITS header value.
+function parseDXF(txt) {
+  if (/^AutoCAD Binary DXF/.test(txt)) throw new Error('Binary DXF is not supported – save the drawing as ASCII DXF.');
+  if (!/\bSECTION\b/.test(txt.slice(0, 5000))) throw new Error('This does not look like a DXF file.');
+  const L = txt.split(/\r?\n/), ents = [];
+  let sec = '', wantName = false, cur = null, lastIns = null, lastPoly = null, units = 0, hdrVar = '';
+  const done = () => {
+    const e = cur; cur = null; if (!e || e.ps) return;
+    if (e.t === 'INSERT') { lastIns = { type: 'INSERT', name: e.name, layer: e.layer, x: e.x, y: e.y, attribs: {} }; ents.push(lastIns); }
+    else if (e.t === 'ATTRIB') { if (lastIns && e.tag) lastIns.attribs[e.tag] = dxfClean(e.text); }
+    else if (e.t === 'TEXT' || e.t === 'MTEXT') { const s = dxfClean(e.chunks.join('') + e.text); if (s) ents.push({ type: 'TEXT', text: s, layer: e.layer, x: e.x, y: e.y, h: e.h }); }
+    else if (e.t === 'LWPOLYLINE') ents.push({ type: 'POLY', layer: e.layer, closed: !!(e.flags & 1), pts: e.pts });
+    else if (e.t === 'POLYLINE') { lastPoly = { type: 'POLY', layer: e.layer, closed: !!(e.flags & 1), pts: [] }; ents.push(lastPoly); }
+    else if (e.t === 'VERTEX') { if (lastPoly) lastPoly.pts.push([e.x, e.y]); }
+    else if (e.t === 'SEQEND') { lastIns = null; lastPoly = null; }
+  };
+  for (let i = 0; i + 1 < L.length; i += 2) {
+    const c = parseInt(L[i], 10), v = L[i + 1];
+    if (!isFinite(c)) { i--; continue; }
+    if (c === 0) {
+      done(); const t = v.trim();
+      if (t === 'SECTION') { wantName = true; continue; }
+      if (t === 'ENDSEC') { sec = ''; continue; }
+      if (t === 'EOF') break;
+      if (t !== 'ATTRIB' && t !== 'SEQEND' && t !== 'VERTEX') lastIns = null;
+      if (t !== 'VERTEX' && t !== 'SEQEND') lastPoly = t === 'POLYLINE' ? lastPoly : null;
+      if (sec === 'ENTITIES') cur = { t, layer: '0', x: 0, y: 0, h: 0, text: '', chunks: [], flags: 0, pts: [], ps: 0, gotXY: false };
+      continue;
+    }
+    if (wantName && c === 2) { sec = v.trim(); wantName = false; continue; }
+    if (sec === 'HEADER') { if (c === 9) hdrVar = v.trim(); else if (hdrVar === '$INSUNITS' && c === 70) units = parseInt(v, 10) || 0; continue; }
+    if (!cur) continue;
+    switch (c) {
+      case 8: cur.layer = v.trim(); break;
+      case 2: if (cur.t === 'ATTRIB') cur.tag = v.trim(); else cur.name = v.trim(); break;
+      case 1: cur.text = v; break;
+      case 3: if (cur.t === 'MTEXT') cur.chunks.push(v); break;
+      case 10: if (cur.t === 'LWPOLYLINE') cur.pts.push([+v, 0]); else if (!cur.gotXY) cur.x = +v; break;
+      case 20: if (cur.t === 'LWPOLYLINE') { if (cur.pts.length) cur.pts[cur.pts.length - 1][1] = +v; } else if (!cur.gotXY) { cur.y = +v; cur.gotXY = true; } break;
+      case 40: if (!cur.h) cur.h = +v; break;
+      case 70: cur.flags = parseInt(v, 10) || 0; break;
+      case 67: cur.ps = parseInt(v, 10) || 0; break;
+    }
+  }
+  done();
+  return { ents, units };
+}
+const polyArea = p => Math.abs(p.reduce((a, q, i) => { const r = p[(i + 1) % p.length]; return a + q[0] * r[1] - r[0] * q[1]; }, 0)) / 2;
+const inPoly = (x, y, p) => { let c = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) { const [xi, yi] = p[i], [xj, yj] = p[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+// Read watts / lumens / type from a legend description (inherits from "SAME AS Lx" where given)
+function rvParseDesc(code, desc, byCode) {
+  const D = desc.toUpperCase(), same = D.match(/SAME AS\s+(L\d+|SW\d+|[A-Z]+\d+)/);
+  const base = same && byCode[same[1]] ? byCode[same[1]] : null;
+  let w = null, lm = null;
+  const wm = D.match(/(\d+(?:\.\d+)?)\s*WATTS?\b/) || D.match(/(\d+)\s*[X×]\s*(\d+(?:\.\d+)?)\s*W\b/) || D.match(/(\d+(?:\.\d+)?)\s*W\b/);
+  if (wm) w = wm[2] ? +wm[1] * +wm[2] : +wm[1];
+  const lmm = D.match(/(\d[\d,]*)\s*(LUMENS?|LM)\b/); if (lmm) lm = +lmm[1].replace(/,/g, '');
+  if (w == null && base) w = base.w; if (lm == null && base) lm = base.lm;
+  let type = rvGuessType((code || '') + ' ' + D, true);
+  if (base && /EMERGENCY|BATTERY/.test(D) && rvLight(base.type)) type = 'Emergency luminaire';
+  else if (base && type === 'Unclassified') type = base.type;
+  return { w, lm, type, fluo: /FLUORESCENT|\bTL5\b|\bT5\b|\bT8\b|\bPL-?C\b/.test(D) || !!(base && base.fluo) };
+}
+function rvGuessType(s, fromLegend) {
+  const S2 = String(s).toUpperCase().replace(/[_-]+/g, ' ');
+  // order matters: "LED panel" is a light, "switched socket" is a socket, "exhaust fan outlet" is not a socket
+  const sockKind = () => /UPS/.test(S2) ? 'Socket – UPS' : /EMERG/.test(S2) ? 'Socket – emergency' : 'Socket';
+  if (/EXIT/.test(S2)) return 'Exit sign';
+  if (/FLOOR.*(BOX|SOCKET)|FLOOR MOUNTED/.test(S2)) return 'Floor box';
+  if (/SOCKET|RECEPTACLE|\bD S\b|\bPS\b/.test(S2)) return sockKind();
+  if (/EXHAUST|\bFANS?\b|HVAC|DUCT/.test(S2)) return 'Ignore';
+  if (/OUTLET/.test(S2)) return sockKind();
+  if (/LUMEN|LUMIN|\bLED\b|LAMP|FLUORESCENT|CHANDELIER|FLOOD|DOWNLIGHT|\bLIGHTS?\b|\bL\d+\b/.test(S2)) return /EMERGENCY|BATTERY|SELF CONTAINED/.test(S2) ? 'Emergency luminaire' : 'Luminaire';
+  if (/SWITCH|SWTCH|\bSW\d/.test(S2)) return 'Switch';
+  if (/PANEL|DISTRIBUTION|\bDB\b|\bMDB\b|\bSMDB\b/.test(S2)) return 'Distribution board';
+  return 'Unclassified';
+}
+// Learn the legend, count symbols by room. Returns a compact, storable sheet summary.
+function analyzeDrawing(ents, units, file) {
+  const T = ents.filter(e => e.type === 'TEXT'), I = ents.filter(e => e.type === 'INSERT' && e.name && e.name[0] !== '*');
+  const med = a => { const s = a.filter(v => v > 0).sort((p, q) => p - q); return s.length ? s[s.length >> 1] : 1; };
+  const legT = T.filter(t => /^\W*LEGEND\W*$|^SYMBOLS?$/i.test(t.text)).sort((a, b) => b.h - a.h)[0];
+  const legend = [], legendIdx = new Set(), amb = {};
+  let box = null;
+  if (legT) {
+    const H = legT.h || med(T.map(t => t.h));
+    const symC = I.map((ins, k) => [ins, k]).filter(([s]) => s.x > legT.x - 3 * H && s.x < legT.x + 6 * H && s.y < legT.y + H && s.y > legT.y - 150 * H);
+    const isCode = s => /^(L|SW|S|P|E|EM|EX|F|UPS)\d{1,3}[A-Z]?$/i.test(s) || /^-{2,3}$/.test(s);
+    const rows = symC.map(([s, k]) => {
+      const row = T.filter(t => Math.abs(t.y - s.y) <= H && t.x > s.x && t.x < s.x + 60 * H).sort((a, b) => b.y - a.y || a.x - b.x);
+      const codeT = row.filter(t => isCode(t.text)).sort((a, b) => Math.abs(a.y - s.y) - Math.abs(b.y - s.y))[0];
+      const desc = row.filter(t => t !== codeT && !isCode(t.text) && !/^(WP|\d{1,2}|DESCRIPTION|SYMBOLS?|NO\.?|ITEM ?NO\.?|QTY|LEGEND|\.)$/i.test(t.text)).map(t => t.text).join(' ');
+      const tags = row.filter(t => /^(WP|\d{2})$/.test(t.text)).map(t => t.text);
+      return { s, k, code: codeT && !/^-+$/.test(codeT.text) ? codeT.text.toUpperCase() : '', desc, tags };
+    }).filter(r => r.code || r.desc.length > 8);
+    const byCode = {};
+    rows.sort((a, b) => b.s.y - a.s.y).forEach(r => {
+      const p = rvParseDesc(r.code, r.desc, byCode); const ent = { block: r.s.name, code: r.code, desc: (r.desc + (r.tags.length ? ' [' + r.tags.join(', ') + ']' : '')).slice(0, 220), ...p };
+      if (r.code) byCode[r.code] = ent; legend.push(ent); legendIdx.add(r.k);
+    });
+    legend.forEach(e => { const others = legend.filter(o => o.block === e.block && o.code !== e.code); if (others.length) amb[e.block] = [...new Set([e.code, ...others.map(o => o.code)])].filter(Boolean); });
+    if (rows.length) { const xs = rows.flatMap(r => [r.s.x]), ys = rows.map(r => r.s.y); box = [Math.min(...xs) - 2 * H, Math.min(...ys) - 2 * H, legT.x + 60 * H, legT.y + 2 * H]; }
+  }
+  const inBox = (x, y) => box && x >= box[0] && x <= box[2] && y >= box[1] && y <= box[3];
+  // rooms: closed polylines on a room/area/space layer, else room-name labels (adjacent lines merged)
+  const u2 = DXF_UNIT_M2[units] ?? 1e-6, words = new RegExp('^(' + RV_ROOM_WORDS + ')(\\s*[-\\d.]+)?$', 'i');
+  const polys = ents.filter(e => e.type === 'POLY' && e.closed && e.pts.length >= 3 && /ROOM|AREA|SPACE|ZONE/i.test(e.layer));
+  const labels = T.filter(t => words.test(t.text) && !inBox(t.x, t.y)).sort((a, b) => b.y - a.y);
+  const merged = [];
+  labels.forEach(t => { const m = merged.find(g => Math.abs(g.x - t.x) < 6 * (t.h || 1) && g.y - t.y > 0 && g.y - t.y < 2.2 * (t.h || 1) && g.parts < 3); if (m) { m.name = /^ROOM$/i.test(m.name) ? t.text + ' ' + m.name : m.name + ' ' + t.text; m.y = t.y; m.x = t.x; m.parts++; } else merged.push({ name: t.text, x: t.x, y: t.y, parts: 1 }); });
+  const rooms = polys.length ? polys.map((p, i) => { const lab = T.find(t => inPoly(t.x, t.y, p.pts) && words.test(t.text)) || T.find(t => inPoly(t.x, t.y, p.pts)); return { name: lab ? lab.text : 'Space ' + (i + 1), area: polyArea(p.pts) * u2, poly: p.pts }; })
+    : merged.map(g => ({ name: g.name.toUpperCase(), x: g.x, y: g.y, area: null }));
+  // disambiguate duplicate names (e.g. two OFFICE labels) by position order
+  const seen = {}; rooms.forEach(r => { seen[r.name] = (seen[r.name] || 0) + 1; }); const k2 = {}; rooms.forEach(r => { if (seen[r.name] > 1) { k2[r.name] = (k2[r.name] || 0) + 1; r.name += ' ' + k2[r.name]; } });
+  const counts = {}, blocks = {};
+  I.forEach((ins, k) => {
+    if (legendIdx.has(k) || inBox(ins.x, ins.y)) return;
+    let room = null;
+    if (polys.length) { const r = rooms.find(r => inPoly(ins.x, ins.y, r.poly)); room = r ? r.name : '(outside rooms)'; }
+    else if (rooms.length) { let d = Infinity; rooms.forEach(r => { const dd = (r.x - ins.x) ** 2 + (r.y - ins.y) ** 2; if (dd < d) { d = dd; room = r.name; } }); }
+    else room = '(no rooms found)';
+    (counts[room] = counts[room] || {})[ins.name] = (counts[room][ins.name] || 0) + 1;
+    const b = blocks[ins.name] = blocks[ins.name] || { n: 0, layers: [], attribs: {} }; b.n++; if (!b.layers.includes(ins.layer)) b.layers.push(ins.layer);
+    Object.entries(ins.attribs || {}).forEach(([t, v]) => { if (Object.keys(b.attribs).length < 6) b.attribs[t] = v; });
+  });
+  return { id: uid(), file, units, legendFound: !!legT, legend, amb, rooms: rooms.map(r => ({ name: r.name, area: r.area })), counts, blocks, roomMode: polys.length ? 'outlines' : rooms.length ? 'labels' : 'none', nIns: I.length, nText: T.length };
+}
+// Combine all imported sheets with the learned / user mapping and run the pre-checks.
+function calcReview(X) {
+  const rv = S.review || {}, sheets = rv.sheets || [], map = rv.map || {};
+  const legendOf = {}; sheets.forEach(sh => sh.legend.forEach(e => { (legendOf[e.block] = legendOf[e.block] || []).push({ ...e, file: sh.file }); }));
+  const blockNames = [...new Set(sheets.flatMap(sh => Object.keys(sh.blocks)))];
+  const eff = {};
+  blockNames.forEach(b => {
+    const L0 = (legendOf[b] || [])[0], o = map[b] || {};
+    const lays = [...new Set(sheets.flatMap(sh => sh.blocks[b] ? sh.blocks[b].layers : []))];
+    const type = o.type || (L0 && L0.type !== 'Unclassified' ? L0.type : rvGuessType(b + ' ' + lays.join(' '))), w = !isBlank(o.w) ? +o.w : L0 && L0.w != null ? L0.w : type === 'Exit sign' ? 3 : null;
+    eff[b] = { block: b, type, w, lm: L0 ? L0.lm : null, code: L0 ? L0.code : '', desc: L0 ? L0.desc : '', fluo: !!(L0 && L0.fluo), src: o.type || !isBlank(o.w) ? 'You' : L0 && L0.type !== 'Unclassified' ? 'Legend' : type !== 'Unclassified' ? 'Block name / layer' : '–', n: sheets.reduce((a, sh) => a + (sh.blocks[b] ? sh.blocks[b].n : 0), 0), layers: [...new Set(sheets.flatMap(sh => sh.blocks[b] ? sh.blocks[b].layers : []))] };
+  });
+  const vaSock = +rv.vaSock || (X.fam === 'NEC' ? 180 : 200);
+  const rooms = {};
+  sheets.forEach(sh => Object.entries(sh.counts).forEach(([rn, bc]) => {
+    const r = rooms[rn] = rooms[rn] || { name: rn, area: null, by: {}, lightW: 0, lum: 0, em: 0, exit: 0, sock: 0, sockWet: 0, sw: 0, db: 0, unk: 0 };
+    const a = (sh.rooms.find(x => x.name === rn) || {}).area; if (a != null && r.area == null) r.area = a;
+    Object.entries(bc).forEach(([b, n]) => {
+      const e = eff[b]; if (!e) return; r.by[e.type] = (r.by[e.type] || 0) + n;
+      if (rvLight(e.type)) { r.lightW += n * (e.w || 0); if (e.type === 'Luminaire') r.lum += n; else if (e.type === 'Emergency luminaire') r.em += n; else r.exit += n; }
+      else if (rvSock(e.type)) r.sock += n; else if (e.type === 'Switch') r.sw += n; else if (e.type === 'Distribution board') r.db += n; else if (e.type === 'Unclassified') r.unk += n;
+    });
+  }));
+  const R2 = Object.values(rooms).map(r => { const ov = (rv.areas || {})[r.name]; if (!isBlank(ov) && +ov > 0) r.area = +ov; r.lpd = r.area ? r.lightW / r.area : null; return r; });
+  const chk = [], add = (scope, item, res, st, ref) => chk.push({ scope, item, res, st, ref });
+  sheets.forEach(sh => { if (!sh.legendFound) add(sh.file, 'Legend found in drawing', 'No LEGEND title found – types taken from block names or your mapping', 'warn', 'Drawing standard'); if (sh.roomMode !== 'outlines') add(sh.file, 'Room outlines', sh.roomMode === 'labels' ? `No room outlines; ${sh.rooms.length} room labels used (nearest-label assignment)` : 'No rooms found', 'warn', 'Closed polylines on a ROOM layer give exact rooms and areas'); });
+  Object.entries(legendOf).forEach(([b, list]) => {
+    sheets.forEach(sh => { if (sh.amb[b]) add(b, 'One block used for several legend types', `${sh.amb[b].join(', ')} share block "${b}" in ${sh.file}`, 'warn', 'Use one block per type (or attributes) so counts are unambiguous'); });
+    const ws = [...new Set(list.map(e => e.w).filter(v => v != null))]; if (ws.length > 1) add(b, 'Legends disagree', list.map(e => `${e.file}: ${e.code || '–'} ${e.w ?? '?'} W`).join('; '), 'bad', 'Make one legend authoritative');
+  });
+  Object.values(eff).forEach(e => {
+    if (e.type === 'Unclassified' && e.n) add(e.block, 'Unidentified symbol', `${e.n} use(s) on layer ${e.layers.join(', ')} – set its type in the mapping`, 'warn', 'Mapping');
+    if ((e.type === 'Luminaire' || e.type === 'Emergency luminaire') && e.n && e.w == null) add(e.block, 'Luminaire wattage', `${e.n} fitting(s) without wattage – enter W in the mapping`, 'warn', 'Load assessment');
+    if (e.fluo && e.n) add(e.block, 'Fluorescent luminaire specified', `${e.code || e.block}: ${e.desc.slice(0, 80)}`, 'warn', 'Energy rules / EU fluorescent phase-out – consider LED');
+  });
+  const anyExit = R2.some(r => r.exit), anyLum = R2.some(r => r.lum + r.em);
+  if (anyLum && !anyExit) add('Drawing set', 'Exit signs', 'No exit signs found', 'warn', X.fam === 'NEC' ? 'NFPA 101 §7.10' : 'BS 5266-1 / EN 1838; ISO 7010 signs');
+  R2.forEach(r => {
+    if (/^\(/.test(r.name)) return;
+    if (rvEscape(r.name) && r.em + r.exit === 0) add(r.name, 'Emergency lighting on escape route', 'No emergency luminaire or exit sign found', 'bad', X.fam === 'NEC' ? 'NFPA 101 §7.9' : 'BS 5266-1 / EN 1838');
+    if (r.area && r.area > 60 && r.em + r.exit === 0) add(r.name, 'Open-area emergency lighting', `${f0(r.area)} m² without emergency luminaire`, 'bad', 'BS 5266-1 (open areas > 60 m²)');
+    if (rvWet(r.name) && r.sock) add(r.name, 'Socket-outlets in wet location', `${r.sock} socket(s) – check zones, IP rating and RCD`, 'warn', X.fam === 'NEC' ? 'NEC 210.8, 406.9' : 'BS 7671 701.512.3 / IEC 60364-7-701');
+    if (anyLum && r.lum + r.em === 0 && !r.unk) add(r.name, 'Room lighting', 'No luminaires found in this room', 'warn', 'Check drawing / room assignment');
+    if (r.lpd != null && r.lpd > 12) add(r.name, 'Lighting power density', `${f1(r.lpd)} W/m²`, 'warn', 'High for LED (typically 5–10 W/m²)');
+  });
+  const cnt = s => chk.filter(c => c.st === s).length;
+  const tot = R2.reduce((a, r) => ({ lightW: a.lightW + r.lightW, sock: a.sock + r.sock, lum: a.lum + r.lum, em: a.em + r.em, exit: a.exit + r.exit, sw: a.sw + r.sw, db: a.db + r.db }), { lightW: 0, sock: 0, lum: 0, em: 0, exit: 0, sw: 0, db: 0 });
+  return { sheets, eff: Object.values(eff).sort((a, b) => b.n - a.n), rooms: R2, chk, tot, vaSock, sockVA: tot.sock * vaSock, nOk: cnt('ok'), nWarn: cnt('warn'), nBad: cnt('bad') };
+}
+
 function calcAll() {
   const X = ctx();
   const Z = calcZones(X), Lo = calcLoads(X), Li = calcLifts(X), P = calcPumps(X), D = S.dc.include ? calcDC(X) : null, Dfull = calcDC(X);
@@ -683,9 +876,9 @@ function calcAll() {
   const room = td ? { L: nTx * td[0] + (nTx + 1) * z.clearance, W: td[1] + 2 * z.clearance, H: Math.max(3, td[2] + 0.8), loss: nTx * td[4], oil: z.txType === 'Oil-immersed (ONAN)' ? nTx * td[5] * 1.1 : 0, wt: td[3] } : null;
   if (room) { room.A = room.L * room.W; room.swL = (Math.ceil(z.ways / 4) + nTx + (nTx > 1 ? 1 : 0)) * 0.8; room.swA = (room.swL + 1.6) * (1.0 + 1.5 + 0.8); room.vent = room.loss / (1.2 * 1.005 * 10); }
   const C = S.circuits.map(k => calcCircuit(k, X));
-  const W = calcDwg(X);
+  const W = calcDwg(X), RV = calcReview(X);
   const E = calcEnergy(X, md, kw, Z.area + (D ? D.white : 0));
-  return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, W, E };
+  return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, W, RV, E };
 }
 function calcEnergy(X, md, kw, area) {
   const e = S.energy, sh = e.shares;
@@ -729,7 +922,7 @@ function cfail(R, key, extra = '') { const n = R.C.filter(c => c.fail === key).l
 /* ---------- views ---------- */
 const VIEWS = [
   ['project', 'Project & region'], ['area', 'Area load schedule'], ['equipment', 'Equipment loads'], ['lifts-pumps', 'Lifts & pumps'], ['data-centre', 'Data centre'],
-  ['sizing', 'Supply & equipment'], ['circuits', 'Cables & protection'], ['energy', 'Energy management'], ['compliance', 'Compliance'], ['drawings', 'Electrical drawings'], ['report', 'Design report'],
+  ['sizing', 'Supply & equipment'], ['circuits', 'Cables & protection'], ['energy', 'Energy management'], ['compliance', 'Compliance'], ['drawings', 'Electrical drawings'], ['review', 'Drawing review'], ['report', 'Design report'],
 ];
 let view = (location.hash || '').slice(1); if (!VIEWS.some(v => v[0] === view)) view = 'project';
 let R = calcAll();
@@ -748,6 +941,7 @@ function railStatus(id) {
   if (id === 'circuits') return R.C.some(c => c.fail && c.fail !== 'REVIEW') ? 'bad' : R.C.some(c => c.fail === 'REVIEW') ? 'warn' : 'ok';
   if (id === 'compliance') { const st = CHECKS.map(c => c[2](R)[1]); return st.includes('bad') ? 'bad' : st.includes('warn') ? 'warn' : 'ok'; }
   if (id === 'sizing') return R.txKva ? 'ok' : 'bad';
+  if (id === 'review') return !R.RV.sheets.length ? '' : R.RV.nBad ? 'bad' : R.RV.nWarn ? 'warn' : 'ok';
   if (id === 'drawings') return !R.W.rooms.length ? '' : R.W.nBad ? 'bad' : R.W.nWarn ? 'warn' : 'ok';
   return '';
 }
@@ -949,7 +1143,29 @@ V.drawings = () => {
   <p class="note">Area loads in Stage 2 already include general lighting and small power, so these room loads are a cross-check and are not added to the maximum demand again.</p>
   <h3>Drawing preview</h3><div class="dwg-wrap">${W.rooms.length ? toSVG(dwgGeom(W)) : '<p class="note">Add rooms to generate a drawing.</p>'}</div></section>`;
 };
-V.report = () => `<section class="sheet">${head('Stage 11', 'Design report', 'A complete electrical load assessment and design report generated from every stage. Save it as an HTML document (opens in any browser or Word, and prints to PDF), or export the schedules as CSV.', `<button class="btn primary" data-act="dl-report">Save report (.html)</button><button class="btn" data-act="dl-csv">Save schedules (.csv)</button><button class="btn" data-act="copy-report">Copy report text</button>`)}
+V.review = () => {
+  const RV = R.RV, rv = S.review;
+  const sh = RV.sheets.map((s, i) => `<tr><td>${esc(s.file)}</td><td class="n">${s.legend.length}</td><td>${s.legendFound ? pill('ok', 'Found') : pill('warn', 'None')}</td><td>${esc({ outlines: 'Room outlines', labels: 'Room labels', none: 'None' }[s.roomMode])} (${s.rooms.length})</td><td class="n">${f0(Object.values(s.blocks).reduce((a, b) => a + b.n, 0))}</td><td><button class="btn small ghost" data-act="rv-del" data-i="${i}" aria-label="Remove ${esc(s.file)}">✕</button></td></tr>`).join('');
+  const mp = RV.eff.map(e => `<tr><td><code>${esc(e.block)}</code></td><td class="n">${e.n}</td><td class="note">${esc(e.layers.join(', '))}</td><td>${esc(e.code)}</td><td class="note">${esc(e.desc)}</td>
+    <td class="wide"><select data-rvmap="${esc(e.block)}" data-k="type">${opt(RV_TYPES, e.type)}</select></td>
+    <td><input type="number" step="any" style="width:70px" data-rvmap="${esc(e.block)}" data-k="w" value="${esc((rv.map[e.block] || {}).w ?? '')}" placeholder="${e.w ?? ''}"${rvLight(e.type) ? '' : ' disabled'}></td><td>${esc(e.src)}</td></tr>`).join('');
+  const rm = RV.rooms.map(r => `<tr><td>${esc(r.name)}</td><td><input type="number" step="any" style="width:80px" data-rvarea="${esc(r.name)}" value="${esc((rv.areas || {})[r.name] ?? '')}" placeholder="${r.area != null ? f1(r.area) : 'm²'}"></td><td class="n">${r.lum}</td><td class="n">${r.em}</td><td class="n">${r.exit}</td><td class="n">${f0(r.lightW)}</td><td class="n">${r.lpd != null ? f1(r.lpd) : '–'}</td><td class="n">${r.sock}</td><td class="n">${r.sw}</td><td class="n">${r.db}</td><td class="n">${r.unk || ''}</td></tr>`).join('');
+  const ck = RV.chk.map(c => `<tr><td>${esc(c.scope)}</td><td>${esc(c.item)}</td><td>${esc(c.res)}</td><td>${pill(c.st, { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st])}</td><td class="note">${esc(c.ref)}</td></tr>`).join('');
+  return `<section class="sheet">${head('Stage 11', 'Drawing review', 'Import AutoCAD drawings as DXF. The legend in each drawing is read to learn what every symbol means, symbols are counted room by room, and the result becomes a load sheet with design pre-checks.', `<button class="btn primary" data-act="load-dxf">Import DXF drawings</button>${RV.sheets.length ? '<button class="btn" data-act="rv-clear">Remove all</button>' : ''}`)}
+  <input type="file" id="dxfIn" accept=".dxf,.dwg" multiple hidden>
+  <p class="callout">In AutoCAD use SAVEAS → DXF (ASCII). Files are read in your browser and are not uploaded. Symbol meanings come from each drawing's legend (symbol → code → description) and stay editable below; your corrections are remembered for the next drawing. Results are a design pre-check, not certification.</p>
+  ${RV.sheets.length ? `<h3>Imported drawings</h3><div class="tbl-wrap"><table><thead><tr><th>Drawing</th><th>Legend rows</th><th>Legend</th><th>Rooms</th><th>Symbols</th><th></th></tr></thead><tbody>${sh}</tbody></table></div>
+  <h3>Symbol mapping (learned from the legend)</h3><div class="grid">${fld('Design load per socket (VA)', inp('review.vaSock', rv.vaSock, 'number', `placeholder="${RV.vaSock}"`), 'For the socket load estimate')}</div>
+  <div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Block</th><th>Uses</th><th>Layer</th><th>Code</th><th>Legend description</th><th>Type</th><th>W each</th><th>Source</th></tr></thead><tbody>${mp}</tbody></table></div>
+  <h3>Load sheet by room</h3><div class="tbl-wrap"><table><thead><tr><th>Room</th><th>Area m²</th><th>Luminaires</th><th>Emergency</th><th>Exit</th><th>Lighting W</th><th>W/m²</th><th>Sockets</th><th>Switches</th><th>Boards</th><th>Unidentified</th></tr></thead><tbody>${rm}
+   <tr class="total"><td>Total</td><td></td><td class="n">${RV.tot.lum}</td><td class="n">${RV.tot.em}</td><td class="n">${RV.tot.exit}</td><td class="n">${f0(RV.tot.lightW)}</td><td></td><td class="n">${RV.tot.sock}</td><td class="n">${RV.tot.sw}</td><td class="n">${RV.tot.db}</td><td></td></tr></tbody></table></div>
+  <div class="kpis" style="margin-top:12px">${[['Lighting load', `${f1(RV.tot.lightW / 1000)} kW`, `${RV.tot.lum + RV.tot.em + RV.tot.exit} fittings`], ['Socket load', `${f1(RV.sockVA / 1000)} kVA`, `${RV.tot.sock} outlets × ${RV.vaSock} VA`], ['Pre-checks', `${RV.nBad} fail · ${RV.nWarn} check`, `${RV.nOk} pass`]].map(([a, b, c]) => `<div class="kpi"><span>${a}</span><b>${b}</b><small>${c}</small></div>`).join('')}</div>
+  <p class="note">Room areas come from room outlines when the drawing has them; otherwise type them in. Lighting load = count × legend wattage. Rooms without outlines are assigned to the nearest room label, so check the counts against the drawing.</p>
+  <h3>Pre-checks</h3><p>${pill('bad', RV.nBad + ' fail')} ${pill('warn', RV.nWarn + ' to check')}</p>
+  <div class="tbl-wrap"><table><thead><tr><th>Scope</th><th>Check</th><th>Result</th><th>Status</th><th>Reference</th></tr></thead><tbody>${ck || '<tr><td colspan="5">No issues found.</td></tr>'}</tbody></table></div>`
+    : '<p class="note">No drawings imported yet. Import lighting and power plans (DXF) – several sheets can be combined.</p>'}</section>`;
+};
+V.report = () => `<section class="sheet">${head('Stage 12', 'Design report', 'A complete electrical load assessment and design report generated from every stage. Save it as an HTML document (opens in any browser or Word, and prints to PDF), or export the schedules as CSV.', `<button class="btn primary" data-act="dl-report">Save report (.html)</button><button class="btn" data-act="dl-csv">Save schedules (.csv)</button><button class="btn" data-act="copy-report">Copy report text</button>`)}
   <div class="paper" id="paper">${reportBody()}</div></section>`;
 
 /* ---------- report ---------- */
@@ -988,6 +1204,11 @@ function reportBody() {
     tbl(['Ref', 'Description', 'Device', 'In A', 'mm²', 'Points', 'Load W', 'Ib A', 'VD %', 'Zs Ω', 'Result'], R.W.C.map(c => [esc(c.ref), esc(c.desc), `${esc(c.cc.dev.n)}${c.rcd ? ' 30 mA' : ''}${c.afdd ? ' + AFDD' : ''}`, c.cc.inr ?? '–', c.cc.csa != null ? `${c.cc.csa}/${c.cc.cpc}` : '–', c.pts, f0(c.w), f1(c.ib), c.cc.vd != null ? f2(c.cc.vd) : '–', c.cc.zs != null ? f2(c.cc.zs) : '–', esc(c.cc.status)])) +
     tbl(['Scope', 'Check', 'Result', 'Status', 'Reference'], R.W.chk.filter(c => c.st !== 'ok').map(c => [esc(c.scope), esc(c.item), esc(c.res), { warn: 'Check', bad: 'Fail' }[c.st], esc(c.ref)])) +
     `<p class="s">Only checks needing attention are listed. Layout is schematic for design development; luminaire spacing, emergency lighting and socket positions must be verified against photometric data and the architecture. This is a design pre-check, not certification.</p>` : ''}
+  ${R.RV.sheets.length ? sec('Drawing review (imported DXF)') + `<p>Drawings reviewed: ${R.RV.sheets.map(x => esc(x.file)).join(', ')}. Symbol meanings were learned from each drawing's legend and confirmed or corrected by the designer. Pre-checks: ${R.RV.nBad} fail, ${R.RV.nWarn} to check.</p>` +
+    tbl(['Room', 'Area m²', 'Luminaires', 'Emergency', 'Exit', 'Lighting W', 'W/m²', 'Sockets'], R.RV.rooms.map(r => [esc(r.name), r.area ? f1(r.area) : '–', r.lum, r.em, r.exit, f0(r.lightW), r.lpd != null ? f1(r.lpd) : '–', r.sock]), ['Total', '', R.RV.tot.lum, R.RV.tot.em, R.RV.tot.exit, f0(R.RV.tot.lightW), '', R.RV.tot.sock]) +
+    tbl(['Block', 'Uses', 'Type', 'Code', 'W', 'Source'], R.RV.eff.filter(e => e.type !== 'Ignore').map(e => [esc(e.block), e.n, esc(e.type), esc(e.code), e.w ?? '–', esc(e.src)])) +
+    (R.RV.chk.length ? tbl(['Scope', 'Check', 'Result', 'Status', 'Reference'], R.RV.chk.map(c => [esc(c.scope), esc(c.item), esc(c.res), { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st], esc(c.ref)])) : '') +
+    `<p class="s">Counts are taken from block references in the drawings; rooms without outlines are assigned to the nearest room label. Verify against the drawings. This is a design pre-check, not certification.</p>` : ''}
   ${sec('Energy management')}${tbl(['Item', 'Value'], [['Baseline electricity', `${f0(R.E.base / 1000)} MWh/yr`], ['Savings from measures', `${f0(R.E.savKwh / 1000)} MWh/yr`], ['Solar PV', `${S.energy.pv} kWp, ${f0(R.E.pvGen / 1000)} MWh/yr`], ['Net grid import', `${f0(R.E.imp / 1000)} MWh/yr (${f0(R.E.eui)} kWh/m²/yr)`], ['Annual cost', `${esc(S.energy.currency)} ${f0(R.E.cost)}`], ['Carbon', `${f1(R.E.tco2)} tCO₂e/yr at ${R.E.co2} kg/kWh`], ['Maximum demand after management', `${f0(R.E.mdAfter)} kVA`], ['Power factor correction', `${f0(R.E.bank)} kVAr automatic bank`]])}
   ${sec('Compliance checklist')}${tbl(['#', 'Requirement', 'Reference', 'Design result', 'Engineer status'], comp)}
   ${sec('Assumptions and limitations')}<ul class="s"><li>Load densities are indicative rules of thumb after diversity; replace with measured or manufacturer data at detailed design.</li><li>Regional factors, demand factors and code values are editable defaults and must be verified against the edition of each code adopted locally.</li><li>Cable ratings are BS 7671 Appendix 4 copper values; use local tables where another code family applies.</li><li>Transformer fault levels assume an infinite source; the utility confirms the network fault level and point of connection.</li><li>This report supports, and does not replace, design verification and certification by a competent person.</li></ul>
@@ -1017,6 +1238,15 @@ function csvSchedules() {
     W.C.forEach(c => L.push([c.ref, c.desc, c.cc.dev.n, c.rcd ? '30 mA' : '', c.cc.inr, c.cc.csa, c.cc.cpc, c.pts, c.w.toFixed(0), c.ib?.toFixed(1), c.len.toFixed(1), c.cc.vd?.toFixed(2), c.cc.zs?.toFixed(3), c.cc.zsMax?.toFixed(3), c.cc.status].map(q).join(',')));
     L.push(''); L.push(q('PARAMETER CHECKS (design pre-check, not certification)')); L.push(['Scope', 'Check', 'Result', 'Status', 'Reference'].map(q).join(','));
     W.chk.forEach(c => L.push([c.scope, c.item, c.res, { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st], c.ref].map(q).join(',')));
+  }
+  if (R.RV.sheets.length) {
+    const RV = R.RV;
+    L.push(''); L.push(q('DRAWING REVIEW – LOAD SHEET BY ROOM (' + RV.sheets.map(x => x.file).join('; ') + ')')); L.push(['Room', 'Area m2', 'Luminaires', 'Emergency', 'Exit', 'Lighting W', 'W/m2', 'Sockets', 'Switches', 'Boards', 'Unidentified'].map(q).join(','));
+    RV.rooms.forEach(r => L.push([r.name, r.area?.toFixed(1), r.lum, r.em, r.exit, r.lightW.toFixed(0), r.lpd?.toFixed(1), r.sock, r.sw, r.db, r.unk].map(q).join(',')));
+    L.push(''); L.push(q('DRAWING REVIEW – SYMBOL MAPPING')); L.push(['Block', 'Uses', 'Layers', 'Code', 'Description', 'Type', 'W', 'Source'].map(q).join(','));
+    RV.eff.forEach(e => L.push([e.block, e.n, e.layers.join(' '), e.code, e.desc, e.type, e.w, e.src].map(q).join(',')));
+    L.push(''); L.push(q('DRAWING REVIEW – PRE-CHECKS (not certification)')); L.push(['Scope', 'Check', 'Result', 'Status', 'Reference'].map(q).join(','));
+    RV.chk.forEach(c => L.push([c.scope, c.item, c.res, { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st], c.ref].map(q).join(',')));
   }
   if (R.D) {
     const D = R.D, a = D.ai, d = S.dc;
@@ -1053,6 +1283,8 @@ function onEdit(e, immediate) {
   const el = e.target;
   if (el.dataset.p) { let v = castVal(el); if (NUM_PATHS.test(el.dataset.p) && v === '') return; setPath(el.dataset.p, v); if (el.dataset.p === 'project.country') { S.project.vllOverride = ''; S.project.vlnOverride = ''; S.project.dregOverride = ''; } if (el.dataset.p === 'dc.platform') applyPlatform(v); }
   else if (el.dataset.arr) { const v = castVal(el); S[el.dataset.arr][+el.dataset.i][el.dataset.k] = el.dataset.k === 'cable' || el.dataset.k === 'ph' ? +v : v; }
+  else if (el.dataset.rvmap) { const m = S.review.map[el.dataset.rvmap] = S.review.map[el.dataset.rvmap] || {}; m[el.dataset.k] = el.dataset.k === 'w' ? castVal(el) : el.value; }
+  else if (el.dataset.rvarea) { S.review.areas[el.dataset.rvarea] = castVal(el); }
   else if (el.dataset.comp) { const i = el.dataset.comp; S.compliance[i] = S.compliance[i] || {}; S.compliance[i][el.dataset.k] = el.value; }
   else return;
   S.project.example = S.project.example && !(el.dataset.p === 'project.name');
@@ -1069,10 +1301,13 @@ document.addEventListener('click', async e => {
   if (b.dataset.add) { S[b.dataset.add].push(BLANK[b.dataset.add]()); persist(); render(); return; }
   if (b.dataset.del) { S[b.dataset.del].splice(+b.dataset.i, 1); persist(); render(); return; }
   const act = b.dataset.act;
-  if (act === 'new') { if (!armedNew) { armedNew = true; b.textContent = 'Click again to clear everything'; b.classList.remove('ghost'); setTimeout(() => { armedNew = false; renderRail(); }, 4000); return; } armedNew = false; const ex = exampleProject(); S = { ...ex, project: { ...ex.project, name: '', ref: '', client: '', site: '', example: false }, zones: [], loads: [], lifts: [], pumps: [], circuits: [], dwgRooms: [], compliance: {} }; persist(); render(); toast('Started a blank project'); }
+  if (act === 'new') { if (!armedNew) { armedNew = true; b.textContent = 'Click again to clear everything'; b.classList.remove('ghost'); setTimeout(() => { armedNew = false; renderRail(); }, 4000); return; } armedNew = false; const ex = exampleProject(); S = { ...ex, project: { ...ex.project, name: '', ref: '', client: '', site: '', example: false }, zones: [], loads: [], lifts: [], pumps: [], circuits: [], dwgRooms: [], review: { sheets: [], map: {}, areas: {}, vaSock: '' }, compliance: {} }; persist(); render(); toast('Started a blank project'); }
   if (act === 'save-json') save(`${S.project.ref || 'project'}-load-design.json`, JSON.stringify(S, null, 1), 'Project file');
   if (act === 'load-json') $('#fileIn').click();
   if (act === 'dl-report') save(`${S.project.ref || 'project'}-electrical-load-design-report.html`, reportDoc(), 'Report');
+  if (act === 'load-dxf') { const f = document.getElementById('dxfIn'); if (f) f.click(); }
+  if (act === 'rv-del') { S.review.sheets.splice(+b.dataset.i, 1); persist(); render(); }
+  if (act === 'rv-clear') { S.review.sheets = []; persist(); render(); toast('Drawings removed (your symbol mapping is kept)'); }
   if (act === 'dl-dxf' || act === 'dl-svg') { if (!R.W.rooms.length) { toast('Add rooms first'); return; } const G = dwgGeom(R.W), base = `${S.project.ref || 'project'}-${(S.dwg.board || 'DB').replace(/[^\w-]+/g, '_')}-electrical-layout`; if (act === 'dl-dxf') save(base + '.dxf', toDXF(G), 'Drawing'); else save(base + '.svg', toSVG(G, true), 'Preview'); }
   if (act === 'dl-csv') save(`${S.project.ref || 'project'}-load-schedules.csv`, csvSchedules(), 'Schedules');
   if (act === 'copy-report') { const t = $('#paper').innerText; try { await navigator.clipboard.writeText(t); toast('Report text copied'); } catch (err) { const r = document.createRange(); r.selectNodeContents($('#paper')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast('Report selected – press Ctrl+C to copy'); } }
@@ -1094,6 +1329,17 @@ $('#fileIn').addEventListener('change', e => {
   const f = e.target.files[0]; if (!f) return; const rd = new FileReader();
   rd.onload = () => { try { const o = JSON.parse(rd.result); if (o.v !== 1 || !o.project) throw 0; S = upgrade(o); persist(); render(); toast(`Opened ${o.project.name || 'project'}`); } catch (err) { toast('That file is not an Electrical Load Designer project'); } e.target.value = ''; };
   rd.readAsText(f);
+});
+// DXF import for the drawing review (read locally; nothing is uploaded)
+document.addEventListener('change', e => {
+  if (e.target.id !== 'dxfIn') return;
+  const files = [...e.target.files]; e.target.value = '';
+  files.forEach(f => {
+    if (/\.dwg$/i.test(f.name)) { toast(`${f.name}: DWG can't be read in the browser – save it as DXF in AutoCAD (SAVEAS → DXF)`); return; }
+    const rd = new FileReader();
+    rd.onload = () => { try { const p = parseDXF(String(rd.result)); const sh = analyzeDrawing(p.ents, p.units, f.name); S.review.sheets = S.review.sheets.filter(x => x.file !== f.name).concat(sh); persist(); render(); toast(`${f.name}: ${sh.legend.length} legend rows, ${Object.values(sh.blocks).reduce((a, b) => a + b.n, 0)} symbols, ${sh.rooms.length} rooms`); } catch (err) { toast(`${f.name}: ${err.message || 'could not be read'}`); } };
+    rd.readAsText(f);
+  });
 });
 let tT; function toast(m) { const t = $('#toast'); t.textContent = m; t.hidden = false; clearTimeout(tT); tT = setTimeout(() => t.hidden = true, 3200); }
 addEventListener('hashchange', () => { const h = location.hash.slice(1); if (VIEWS.some(v => v[0] === h)) { view = h; render(); scrollTo(0, 0); } });

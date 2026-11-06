@@ -12,3 +12,6 @@ package-lock.json
 
 # Local tool settings
 .claude/
+
+# Drawings supplied for review (not published)
+dxf/
