@@ -1,4 +1,6 @@
-# Electrical Load Designer
+# NexvoraHub Studio
+
+*Electrical load design studio* – load assessment, design reports, electrical drawing generation and AutoCAD (DXF) drawing review.
 
 Electrical load assessment and design tools for buildings, usable across 94 countries and regions (UK BS 7671 / IEC 60364, NEC, CEC, AS/NZS 3000 families).
 
@@ -8,9 +10,9 @@ Electrical load assessment and design tools for buildings, usable across 94 coun
 |---|---|
 | `Electrical Load Design Report.xlsx` | Excel design template (27 sheets): regional load schedules, NEC/CEC code calculation, equipment loads with demand/diversity/simultaneity factors, lifts, pumps, data centre, BS 7671 cable and protection, transformers and switchrooms, energy management, compliance checklist, utility application data. |
 | `_build/` | Node.js scripts that generate the workbook. |
-| `app/load-designer.html` | Single-file web app: load assessment and design report generator using the same design data. |
-| `app/src/` | App source, data extractor, local preview server and headless tests. |
-| `site/index.html` | Standalone build of the app for web hosting (deployed on Vercel). Only this folder is published. |
+| `app/load-designer.html` | Single-file web app (NexvoraHub Studio): load assessment, design report, AI data-centre planning, electrical drawing generator (DXF), drawing review with legend learning, panel-schedule import and design on submitted layouts. |
+| `app/src/` | App source, AI data-centre library (`ai-dc-data.json`), data extractor, local preview server and headless tests. |
+| `site/index.html` | Standalone build of the app for web hosting. Only this folder is published. |
 
 ## Rebuild the workbook
 

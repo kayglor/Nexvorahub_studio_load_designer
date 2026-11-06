@@ -22,7 +22,7 @@ const site = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="description" content="Electrical load assessment and design report generator for 94 countries and regions.">
+<meta name="description" content="NexvoraHub Studio – electrical load assessment, design, drawing review and AutoCAD output for 94 countries and regions.">
 <style>${reset}</style>
 </head>
 <body>
