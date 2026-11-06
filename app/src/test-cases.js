@@ -241,4 +241,41 @@ out.layoutChecks = lyFail.length ? lyFail : 'all passed';
   S.dwgRooms = []; R = calcAll(); const ec = CHECKS.find(c => /Energy metering/.test(c[0]))[2](R); if (isFinite(R.E.eui) || ec[1] !== 'na' || !/not known/.test(ec[0])) eFail.push('no area got ' + JSON.stringify([R.E.eui, ec]));
   view = 'energy'; render(); if (/NaN/.test(document.querySelector('#main').innerHTML + reportDoc())) eFail.push('NaN shown');
   S.zones = zs; S.dwgRooms = rs; S.dc.include = dci; R = calcAll(); out.energyAreaChecks = eFail.length ? eFail : 'all passed'; }
+// ---- panel schedules read from a DXF table; optional maximum-demand basis ----
+{ const pFail = [], pchk = (n, ok, got) => { if (!ok) pFail.push(n + (got !== undefined ? ' got ' + JSON.stringify(got) : '')); };
+  const pvSave = JSON.stringify(S.review);
+  // two schedules side by side (text height 0.3, as in the course drawing); B has an arithmetic slip and a small incomer
+  const sch = (() => { const o = [], p = (c, v) => o.push(String(c), String(v)), T = (x, y, s, h = 0.3) => { p(0, 'TEXT'); p(8, 'PS'); p(10, x); p(20, y); p(30, 0); p(40, h); p(1, s); };
+    p(0, 'SECTION'); p(2, 'ENTITIES');
+    const one = (dx, name, cats, conn, df, dem, total, stated, mcb) => {
+      T(dx + 4.7, 20.35, 'PANEL:'); T(dx + 6.2, 20.3, name, 0.4); T(dx - 4.6, 19.6, '400/230V&50HZ'); T(dx + 0.4, 19.7, 'ISC=25 KA');
+      T(dx + 3.7, -1, mcb + ' AMPS TRIP/FRAME'); T(dx + 9, -1, 'MCCB');
+      T(dx - 7.4, -3.43, `TOTAL CONNECTED LOAD ${stated} KVA`);
+      cats.forEach((c, i) => T(dx + 2.3 + 1.7 * i, -2.45, c)); T(dx + 2.3 + 1.7 * cats.length, -2.45, 'TOTAL');
+      T(dx, -3.06, 'CONN. KVA'); conn.forEach((v, i) => T(dx + 2.6 + 1.7 * i, -3.1, v)); T(dx + 2.6 + 1.7 * cats.length, -3.12, total[0]);
+      T(dx, -3.71, 'DEM. FACTOR'); df.forEach((v, i) => T(dx + 2.6 + 1.7 * i, -3.75, v));
+      T(dx, -4.4, 'DEMAND KVA'); dem.forEach((v, i) => T(dx + 2.6 + 1.7 * i, -4.45, v)); T(dx + 2.6 + 1.7 * cats.length, -4.45, total[1]);
+    };
+    one(-32.7, 'DB-A', ['LIGHTING', 'S.OUTLET'], ['20', '10'], ['0.8', '0.5'], ['16', '5'], ['30', '21'], '30', '63/100');
+    one(-10.7, 'DB-B', ['MOTORS', 'MISC.'], ['40', '20'], ['1', '0.5'], ['40', '10'], ['60', '60'], '62', '50/100');
+    p(0, 'ENDSEC'); p(0, 'EOF'); return o.join('\r\n'); })();
+  const ps = analyzeDrawing(parseDXF(sch).ents, 6, 'panels.dxf'), A = ps.panels.find(q => q.name === 'DB-A'), B = ps.panels.find(q => q.name === 'DB-B');
+  pchk('two panels found', ps.panels.length === 2 && A && B, ps.panels.map(q => q.name));
+  pchk('panel A read', A.vll === 400 && A.vln === 230 && A.isc === 25 && A.trip === 63 && A.frame === 100 && A.dev === 'MCCB' && A.conn === 30 && A.dem === 21 && A.stated === 30 && A.cats.length === 2 && A.cats[0].name === 'Lighting' && A.cats[0].df === 0.8 && A.cats[1].name === 'Socket outlets' && A.cats[1].dem === 5, A);
+  pchk('panel B read', B.trip === 50 && B.conn === 60 && B.dem === 60 && B.cats[0].name === 'Motors' && near(B.demCalc, 50), B);
+  S.project.country = 'United Kingdom'; S.review = { sheets: [ps], map: {}, areas: {}, vaSock: '', mdBasis: 'area' }; R = calcAll();
+  const pc = R.RV.chk, has = (sc, it, st) => pc.some(c => c.scope === 'Panel ' + sc && c.item === it && c.st === st);
+  pchk('A breaker ok', has('DB-A', 'Incoming breaker vs demand current', 'ok'));
+  pchk('B demand 87 A on 50 A fails', has('DB-B', 'Incoming breaker vs demand current', 'bad') && near(R.RV.panels.find(q => q.name === 'DB-B').iDem, 60000 / (Math.sqrt(3) * 400)));
+  pchk('B demand-factor slip and stated total flagged', has('DB-B', 'Demand factors applied', 'warn') && has('DB-B', 'Stated total connected load', 'warn'));
+  pchk('no legend/room noise for schedule-only drawing', !pc.some(c => /Legend found|Room outlines|Unidentified/.test(c.item)), pc.map(c => c.item));
+  const mdArea = R.md;
+  S.review.mdBasis = 'panels'; R = calcAll();
+  pchk('panel basis', R.PB === 81 && near(R.md, (81 + R.Li.kva + R.P.kva + (R.D ? R.D.md : 0)) * (1 + S.project.spare)) && R.md !== mdArea, [R.PB, R.md]);
+  view = 'review'; render(); const ph = document.querySelector('#main').innerHTML; pchk('review view panels', /Panel schedules/.test(ph) && /Maximum demand basis/.test(ph) && /DB-B/.test(ph));
+  view = 'sizing'; render(); pchk('sizing shows panel basis', /Panel schedules/.test(document.querySelector('#main').innerHTML));
+  pchk('report + csv', /based on the imported panel schedules/.test(reportDoc()) && /PANEL SCHEDULES \(imported\) – used as maximum demand basis/.test(csvSchedules()));
+  S.review = JSON.parse(pvSave); R = calcAll(); pchk('default basis unchanged', R.PB == null && near(R.md, mdArea));
+  out.panels = ps.panels.map(q => [q.name, q.conn, q.dem, q.trip, q.vll]);
+  out.panelChecks = pFail.length ? pFail : 'all passed'; }
 for (const [k, v] of Object.entries(out)) console.log(k, '=', JSON.stringify(v));

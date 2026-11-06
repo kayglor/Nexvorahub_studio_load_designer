@@ -789,6 +789,38 @@ function rvGuessType(s, fromLegend) {
   return 'Unclassified';
 }
 // Learn the legend, count symbols by room. Returns a compact, storable sheet summary.
+// Panel (distribution board) schedules drawn as text tables: reads each summary block
+// (header row LIGHTING / MOTORS / S.OUTLET / MISC. / TOTAL; rows CONN. KVA, DEM. FACTOR, DEMAND KVA) by column alignment,
+// plus panel name, voltage, Isc and main breaker found near the table. Tolerances scale with the text height.
+const PNL_CATS = [[/^(LIGHTING|LIGHTS?)$/i, 'Lighting'], [/^MOTORS?$/i, 'Motors'], [/^(S\.?\s*OUTLETS?|SOCKETS?|SOCKET OUTLETS?|RECEPTACLES?)$/i, 'Socket outlets'], [/^(MISC\.?|MISCELLANEOUS|OTHERS?)$/i, 'Misc.'], [/^HVAC$/i, 'HVAC'], [/^POWER$/i, 'Power'], [/^TOTAL$/i, 'TOTAL']];
+function parsePanels(T) {
+  const num = s => { const v = String(s).trim(); if (/^[-–—]+$/.test(v)) return 0; const m = v.replace(',', '.').match(/^\d+(\.\d+)?$/); return m ? +m[0] : null; };
+  const catOf = s => (PNL_CATS.find(([re]) => re.test(String(s).trim())) || [])[1];
+  return T.filter(t => /^CONN(\.|ECTED)?\s*(LOAD\s*)?\(?KVA\)?$/i.test(t.text)).map(lab => {
+    const h = lab.h || 1, win = t => t.x > lab.x - 10 * h && t.x < lab.x + 45 * h, winW = t => t.x > lab.x - 25 * h && t.x < lab.x + 45 * h;
+    const hc = T.filter(t => win(t) && t.y > lab.y + 0.3 * h && t.y < lab.y + 5 * h && catOf(t.text));
+    if (!hc.length) return null;
+    const hy = Math.min(...hc.map(t => t.y)), hdr = hc.filter(t => Math.abs(t.y - hy) < 0.6 * h).sort((a, b) => a.x - b.x);
+    const below = re => T.filter(t => re.test(t.text) && Math.abs(t.x - lab.x) < 2 * h && t.y < lab.y - 0.3 * h && t.y > lab.y - 6 * h).sort((a, b) => b.y - a.y)[0];
+    const dfL = below(/^DEM(\.|AND)?\s*FACTOR$/i), dmL = below(/^DEMAND\s*(LOAD\s*)?\(?KVA\)?$/i);
+    const val = (rowY, col) => { const c = T.filter(t => Math.abs(t.y - rowY) < 0.6 * h && Math.abs(t.x - col.x) < 2.5 * h && num(t.text) != null).sort((a, b) => Math.abs(a.x - col.x) - Math.abs(b.x - col.x))[0]; return c ? num(c.text) : null; };
+    const cats = [], tot = {};
+    hdr.forEach(c => { const k = catOf(c.text), r = { name: k, conn: val(lab.y, c), df: dfL ? val(dfL.y, c) : null, dem: dmL ? val(dmL.y, c) : null }; if (k === 'TOTAL') Object.assign(tot, r); else cats.push(r); });
+    const nearest = (re, maxDy = 30 * h, from = lab) => T.filter(t => winW(t) && re.test(t.text) && t.y > from.y - 4 * h && t.y < from.y + maxDy).sort((a, b) => Math.hypot(a.x - from.x, a.y - from.y) - Math.hypot(b.x - from.x, b.y - from.y))[0];
+    const pl = T.filter(t => /^PANEL\s*:?/i.test(t.text) && !/PANELBOARD/i.test(t.text) && t.y > lab.y && win(t)).sort((a, b) => Math.abs(a.x - lab.x) - Math.abs(b.x - lab.x) || a.y - b.y)[0];
+    let name = '';
+    if (pl) { const inl = pl.text.replace(/^PANEL\s*:?\s*/i, '').trim(); const nb = T.filter(t => t !== pl && Math.abs(t.y - pl.y) < 0.6 * h && t.x > pl.x && t.x < pl.x + 12 * h && !/:$|PANELBOARD/i.test(t.text)).sort((a, b) => a.x - b.x)[0]; name = inl || (nb ? nb.text : ''); }
+    const ref = pl || lab;
+    const vt = nearest(/\d{3}\s*\/\s*\d{3}\s*V/i, 40 * h, ref), vm = vt && vt.text.match(/(\d{3})\s*\/\s*(\d{3})/);
+    const it = nearest(/I\s*SC\s*=?\s*\d/i, 40 * h, ref), im = it && it.text.match(/(\d+(?:\.\d+)?)\s*KA/i);
+    const mt = T.filter(t => win(t) && /^\d+\s*\/\s*\d+\s*AMPS?\b/i.test(t.text) && t.y > lab.y && t.y < lab.y + 8 * h).sort((a, b) => a.y - b.y)[0], mm = mt && mt.text.match(/(\d+)\s*\/\s*(\d+)/);
+    const dt = mt && T.filter(t => /^(MCCB|MCB|ACB|FUSE|RCBO|ELCB|MCB\/RCBO)$/i.test(t.text) && Math.abs(t.y - mt.y) < 0.6 * h && t.x > mt.x && t.x < mt.x + 25 * h).sort((a, b) => a.x - b.x)[0];
+    const st = T.filter(t => winW(t) && /TOTAL CONNECTED LOAD\s*[\d.]+\s*KVA/i.test(t.text) && Math.abs(t.y - lab.y) < 3 * h).sort((a, b) => Math.abs(a.x - lab.x) - Math.abs(b.x - lab.x))[0];
+    const connSum = cats.reduce((a, c) => a + (c.conn || 0), 0), demCalc = cats.reduce((a, c) => a + (c.conn || 0) * (c.df ?? 0), 0), demSum = cats.reduce((a, c) => a + (c.dem || 0), 0);
+    const conn = tot.conn || connSum, dem = tot.dem || demSum || demCalc;
+    return { name: name || 'Panel', vll: vm ? Math.max(+vm[1], +vm[2]) : null, vln: vm ? Math.min(+vm[1], +vm[2]) : null, isc: im ? +im[1] : null, trip: mm ? +mm[1] : null, frame: mm ? +mm[2] : null, dev: dt ? dt.text.toUpperCase() : '', cats: cats.filter(c => c.conn || c.dem), conn, dem, connSum, demCalc, stated: st ? +st.text.match(/([\d.]+)\s*KVA/i)[1] : null, x: Math.round(lab.x), y: Math.round(lab.y) };
+  }).filter(Boolean);
+}
 function analyzeDrawing(ents, units, file) {
   const T = ents.filter(e => e.type === 'TEXT'), I = ents.filter(e => e.type === 'INSERT' && e.name && e.name[0] !== '*');
   const med = a => { const s = a.filter(v => v > 0).sort((p, q) => p - q); return s.length ? s[s.length >> 1] : 1; };
@@ -834,7 +866,10 @@ function analyzeDrawing(ents, units, file) {
     const b = blocks[ins.name] = blocks[ins.name] || { n: 0, layers: [], attribs: {} }; b.n++; if (!b.layers.includes(ins.layer)) b.layers.push(ins.layer);
     Object.entries(ins.attribs || {}).forEach(([t, v]) => { if (Object.keys(b.attribs).length < 6) b.attribs[t] = v; });
   });
-  return { id: uid(), file, units, legendFound: !!legT, legend, amb, rooms: rooms.map(r => ({ name: r.name, area: r.area })), counts, blocks, roomMode: polys.length ? 'outlines' : rooms.length ? 'labels' : 'none', nIns: I.length, nText: T.length };
+  const panels = parsePanels(T);
+  // a schedule-only drawing: ignore stray blocks (logos, title blocks) so they are not reported as unidentified symbols
+  if (panels.length && !legT) { Object.keys(blocks).forEach(k => delete blocks[k]); Object.keys(counts).forEach(k => delete counts[k]); }
+  return { id: uid(), file, units, panels, legendFound: !!legT, legend, amb, rooms: rooms.map(r => ({ name: r.name, area: r.area })), counts, blocks, roomMode: polys.length ? 'outlines' : rooms.length ? 'labels' : 'none', nIns: I.length, nText: T.length };
 }
 // Room-name labels (two-line names such as "AUX. TRANSFORMER" / "ROOM" merged), excluding a legend box
 function rvRoomLabels(T, inBox = () => false) {
@@ -933,7 +968,7 @@ function calcReview(X) {
   }));
   const R2 = Object.values(rooms).map(r => { const ov = (rv.areas || {})[r.name]; if (!isBlank(ov) && +ov > 0) r.area = +ov; r.lpd = r.area ? r.lightW / r.area : null; return r; });
   const chk = [], add = (scope, item, res, st, ref) => chk.push({ scope, item, res, st, ref });
-  sheets.forEach(sh => { if (!sh.legendFound) add(sh.file, 'Legend found in drawing', 'No LEGEND title found – types taken from block names or your mapping', 'warn', 'Drawing standard'); if (sh.roomMode !== 'outlines') add(sh.file, 'Room outlines', sh.roomMode === 'labels' ? `No room outlines; ${sh.rooms.length} room labels used (nearest-label assignment)` : 'No rooms found', 'warn', 'Closed polylines on a ROOM layer give exact rooms and areas'); });
+  sheets.filter(sh => !((sh.panels || []).length && !sh.legendFound)).forEach(sh => { if (!sh.legendFound) add(sh.file, 'Legend found in drawing', 'No LEGEND title found – types taken from block names or your mapping', 'warn', 'Drawing standard'); if (sh.roomMode !== 'outlines') add(sh.file, 'Room outlines', sh.roomMode === 'labels' ? `No room outlines; ${sh.rooms.length} room labels used (nearest-label assignment)` : 'No rooms found', 'warn', 'Closed polylines on a ROOM layer give exact rooms and areas'); });
   Object.entries(legendOf).forEach(([b, list]) => {
     sheets.forEach(sh => { if (sh.amb[b]) add(b, 'One block used for several legend types', `${sh.amb[b].join(', ')} share block "${b}" in ${sh.file}`, 'warn', 'Use one block per type (or attributes) so counts are unambiguous'); });
     const ws = [...new Set(list.map(e => e.w).filter(v => v != null))]; if (ws.length > 1) add(b, 'Legends disagree', list.map(e => `${e.file}: ${e.code || '–'} ${e.w ?? '?'} W`).join('; '), 'bad', 'Make one legend authoritative');
@@ -953,15 +988,29 @@ function calcReview(X) {
     if (anyLum && r.lum + r.em === 0 && !r.unk) add(r.name, 'Room lighting', 'No luminaires found in this room', 'warn', 'Check drawing / room assignment');
     if (r.lpd != null && r.lpd > 12) add(r.name, 'Lighting power density', `${f1(r.lpd)} W/m²`, 'warn', 'High for LED (typically 5–10 W/m²)');
   });
+  // panel schedules (latest import of each panel name wins)
+  const pmap = {}; sheets.forEach(sh => (sh.panels || []).forEach(p => { pmap[p.name] = { ...p, file: sh.file }; }));
+  const panels = Object.values(pmap).map(p => { const v = p.vll || X.vll; return { ...p, vUse: v, iDem: p.dem * 1000 / (SQ3 * v), iConn: p.conn * 1000 / (SQ3 * v) }; });
+  panels.forEach(p => {
+    const sc = 'Panel ' + p.name;
+    if (p.cats.length && Math.abs(p.connSum - p.conn) > Math.max(0.5, 0.02 * p.conn)) add(sc, 'Connected load adds up', `categories ${f1(p.connSum)} kVA vs total ${f1(p.conn)} kVA`, 'warn', 'Schedule arithmetic');
+    if (p.stated != null && Math.abs(p.stated - p.conn) > Math.max(0.5, 0.02 * p.conn)) add(sc, 'Stated total connected load', `${f1(p.stated)} kVA stated vs ${f1(p.conn)} kVA in table`, 'warn', 'Schedule arithmetic');
+    if (p.cats.length && p.cats.every(c => c.df != null) && p.dem && Math.abs(p.demCalc - p.dem) > Math.max(0.6, 0.05 * p.dem)) add(sc, 'Demand factors applied', `Σ connected × factor = ${f1(p.demCalc)} kVA vs ${f1(p.dem)} kVA stated`, 'warn', 'Schedule arithmetic');
+    if (p.trip) { add(sc, 'Incoming breaker vs demand current', `${f0(p.iDem)} A demand on ${p.trip} A ${p.dev}`, p.iDem <= p.trip ? 'ok' : 'bad', { IEC: 'BS 7671 433.1.1 (Ib ≤ In)', NEC: 'NEC 408.36; 215.3', CEC: 'CEC Rule 14-104', ASNZS: 'AS/NZS 3000 Cl. 2.5.3' }[X.fam]); if (p.iConn > p.trip) add(sc, 'Connected load vs incoming breaker', `${f0(p.iConn)} A connected exceeds ${p.trip} A – relies on the demand factors`, 'warn', 'Confirm diversity'); }
+    else add(sc, 'Incoming breaker', 'Rating not found on the schedule', 'warn', 'Schedule completeness');
+    if (p.vll && Math.abs(p.vll - X.vll) / X.vll > 0.03) add(sc, 'Panel voltage vs project supply', `${p.vll}/${p.vln} V on schedule vs ${X.vll}/${X.vln} V project`, 'warn', 'Project & region');
+  });
   const cnt = s => chk.filter(c => c.st === s).length;
   const tot = R2.reduce((a, r) => ({ lightW: a.lightW + r.lightW, sock: a.sock + r.sock, lum: a.lum + r.lum, em: a.em + r.em, exit: a.exit + r.exit, sw: a.sw + r.sw, db: a.db + r.db }), { lightW: 0, sock: 0, lum: 0, em: 0, exit: 0, sw: 0, db: 0 });
-  return { sheets, eff: Object.values(eff).sort((a, b) => b.n - a.n), rooms: R2, chk, tot, vaSock, sockVA: tot.sock * vaSock, nOk: cnt('ok'), nWarn: cnt('warn'), nBad: cnt('bad') };
+  return { panels, panelDem: panels.reduce((a, p) => a + p.dem, 0), panelConn: panels.reduce((a, p) => a + p.conn, 0), sheets, eff: Object.values(eff).sort((a, b) => b.n - a.n), rooms: R2, chk, tot, vaSock, sockVA: tot.sock * vaSock, nOk: cnt('ok'), nWarn: cnt('warn'), nBad: cnt('bad') };
 }
 
 function calcAll() {
   const X = ctx();
   const Z = calcZones(X), Lo = calcLoads(X), Li = calcLifts(X), P = calcPumps(X), D = S.dc.include ? calcDC(X) : null, Dfull = calcDC(X);
-  const sub = Z.kva + Lo.kva + Li.kva + P.kva + (D ? D.md : 0);
+  // Maximum-demand basis: area + equipment schedules (default), or imported panel schedules (+ lifts, pumps, data hall)
+  const RV = calcReview(X), PB = S.review && S.review.mdBasis === 'panels' && RV.panels.length ? RV.panels.reduce((a, p) => a + p.dem, 0) : null;
+  const sub = PB != null ? PB + Li.kva + P.kva + (D ? D.md : 0) : Z.kva + Lo.kva + Li.kva + P.kva + (D ? D.md : 0);
   const spare = sub * (+S.project.spare || 0), md = sub + spare, kw = md * X.pf, amps = md * 1000 / (SQ3 * X.vll);
   const z = S.sizing, nTx = Math.max(1, +z.txCount || 1);
   const reqTx = z.resilience === 'N+1' ? md / z.txLoading / Math.max(nTx - 1, 1) : md / z.txLoading / nTx;
@@ -979,10 +1028,10 @@ function calcAll() {
   const room = td ? { L: nTx * td[0] + (nTx + 1) * z.clearance, W: td[1] + 2 * z.clearance, H: Math.max(3, td[2] + 0.8), loss: nTx * td[4], oil: z.txType === 'Oil-immersed (ONAN)' ? nTx * td[5] * 1.1 : 0, wt: td[3] } : null;
   if (room) { room.A = room.L * room.W; room.swL = (Math.ceil(z.ways / 4) + nTx + (nTx > 1 ? 1 : 0)) * 0.8; room.swA = (room.swL + 1.6) * (1.0 + 1.5 + 0.8); room.vent = room.loss / (1.2 * 1.005 * 10); }
   const C = S.circuits.map(k => calcCircuit(k, X));
-  const W = calcDwg(X), RV = calcReview(X);
+  const W = calcDwg(X);
   // floor area for energy intensity: area schedule (+ data hall); if there is none, the rooms on the electrical drawing
   const E = calcEnergy(X, md, kw, (Z.area + (D ? D.white : 0)) || W.area || 0);
-  return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, W, RV, E };
+  return { X, Z, Lo, Li, P, D, Dfull, sub, spare, md, kw, amps, swb: nextStd(SWB, amps), txKva, nTx, reqTx, flc, fl1, flP, incomer, icw, supply, ess, gen, met, bond, pme, nEarth, room, C, W, RV, PB, E };
 }
 function calcEnergy(X, md, kw, area) {
   const e = S.energy, sh = e.shares;
@@ -1164,7 +1213,7 @@ function aiDcSection(d, D) {
 }
 V.sizing = () => {
   const z = S.sizing, r = R.room;
-  const parts = [['Area loads', R.Z.kva], ['Equipment', R.Lo.kva], ['Lifts', R.Li.kva], ['Pumps', R.P.kva], ['Data centre', R.D ? R.D.md : 0], ['Spare', R.spare]];
+  const parts = R.PB != null ? [['Panel schedules', R.PB], ['Lifts', R.Li.kva], ['Pumps', R.P.kva], ['Data centre', R.D ? R.D.md : 0], ['Spare', R.spare]] : [['Area loads', R.Z.kva], ['Equipment', R.Lo.kva], ['Lifts', R.Li.kva], ['Pumps', R.P.kva], ['Data centre', R.D ? R.D.md : 0], ['Spare', R.spare]];
   const colors = ['var(--accent)', 'var(--ok)', 'var(--warn)', 'var(--line-strong)', 'var(--bad)', 'var(--muted)'];
   return `<section class="sheet">${head('Stage 6', 'Supply & equipment sizing', 'Maximum demand build-up, transformer, main switchboard, standby generation, earthing and plant-room space.')}
   <div class="bar" aria-hidden="true">${parts.map((p, i) => `<i style="width:${R.md ? p[1] / R.md * 100 : 0}%;background:${colors[i]}"></i>`).join('')}</div>
@@ -1262,6 +1311,8 @@ V.review = () => {
   <input type="file" id="dxfIn" accept=".dxf,.dwg" multiple hidden>
   <p class="callout">In AutoCAD use SAVEAS → DXF (ASCII). Files are read in your browser and are not uploaded. Symbol meanings come from each drawing's legend (symbol → code → description) and stay editable below; your corrections are remembered for the next drawing. Results are a design pre-check, not certification.</p>
   ${RV.sheets.length ? `<h3>Imported drawings</h3><div class="tbl-wrap"><table><thead><tr><th>Drawing</th><th>Legend rows</th><th>Legend</th><th>Rooms</th><th>Symbols</th><th></th></tr></thead><tbody>${sh}</tbody></table></div>
+  ${RV.panels.length ? `<h3>Panel schedules</h3><div class="tbl-wrap"><table><thead><tr><th>Panel</th><th>Voltage</th><th>Isc kA</th><th>Incomer</th><th>Connected by category (kVA × demand factor)</th><th>Connected kVA</th><th>Demand kVA</th><th>Demand A</th></tr></thead><tbody>${RV.panels.map(p => `<tr><td>${esc(p.name)}</td><td>${p.vll ? p.vll + '/' + p.vln + ' V' : '–'}</td><td class="n">${p.isc ?? '–'}</td><td>${p.trip ? `${p.trip}/${p.frame} A ${esc(p.dev)}` : '–'}</td><td class="note">${p.cats.map(c => `${esc(c.name)} ${f1(c.conn)}${c.df != null ? ' × ' + c.df : ''}`).join(' · ')}</td><td class="n">${f1(p.conn)}</td><td class="n">${f1(p.dem)}</td><td class="n">${f0(p.iDem)}</td></tr>`).join('')}<tr class="total"><td colspan="5">Total of imported panels</td><td class="n">${f1(RV.panelConn)}</td><td class="n">${f1(RV.panelDem)}</td><td></td></tr></tbody></table></div>
+  <div class="grid" style="margin-top:8px">${fld('Maximum demand basis', sel('review.mdBasis', [{ v: 'area', t: 'Area and equipment schedules (Stages 2–3)' }, { v: 'panels', t: 'Imported panel schedules' }], rv.mdBasis || 'area'), 'Panel basis replaces area and equipment loads; lifts, pumps and the data hall are still added')}</div>` : ''}
   <h3>Symbol mapping (learned from the legend)</h3><div class="grid">${fld('Design load per socket (VA)', inp('review.vaSock', rv.vaSock, 'number', `placeholder="${RV.vaSock}"`), 'For the socket load estimate')}</div>
   <div class="tbl-wrap" style="margin-top:8px"><table><thead><tr><th>Block</th><th>Uses</th><th>Layer</th><th>Code</th><th>Legend description</th><th>Type</th><th>W each</th><th>Source</th></tr></thead><tbody>${mp}</tbody></table></div>
   <h3>Load sheet by room</h3><div class="tbl-wrap"><table><thead><tr><th>Room</th><th>Area m²</th><th>Luminaires</th><th>Emergency</th><th>Exit</th><th>Lighting W</th><th>W/m²</th><th>Sockets</th><th>Switches</th><th>Boards</th><th>Unidentified</th></tr></thead><tbody>${rm}
@@ -1302,7 +1353,7 @@ function reportBody() {
   ${R.Lo.rows.length ? sec('Equipment loads') + tbl(['Board', 'Item', 'Category', 'Connected kW', 'Demand f.', 'Diversity', 'Demand kVA'], R.Lo.rows.map(r => [esc(r.l.db), esc(r.l.desc), esc(r.l.cat), f1(r.conn), f2(r.ku), f2(r.df), f1(r.kva)])) + tbl(['Board', 'Items', 'Ks', 'Demand kVA', 'Current A'], R.Lo.dbs.map(d => [esc(d.name), d.n, f2(d.ks), f1(d.dem), f0(d.amps)]), ['Equipment MD', '', `× ${S.mainSF}`, f1(R.Lo.kva), '']) : ''}
   ${R.Li.rows.length || R.P.rows.length ? sec('Lifts and pumps') + (R.Li.rows.length ? tbl(['Lift group', 'Lifts', 'Rated load kg', 'Speed m/s', 'Motor kW', 'Group kVA', 'HC5 %', 'Interval s'], R.Li.rows.map(r => [esc(r.L.desc), r.L.n, f0(r.load), f2(r.v), f1(r.motor), f1(r.grp), r.hcp == null ? '–' : pct(r.hcp, 1), f0(r.interval)])) : '') + (R.P.rows.length ? tbl(['Pump', 'Service', 'Motor kW', 'Starter / drive', 'FLC A', 'Duty kVA'], R.P.rows.map(r => [esc(r.p.desc), esc(r.p.svc), f2(r.motor), esc(r.starter), f1(r.flc), f1(r.kva)])) : '') : ''}
   ${R.D ? sec('Data centre') + tbl(['Parameter', 'Value'], [['Resilience', `${esc(R.D.t[0])} (${R.D.t[1]}, EN 50600 ${R.D.t[2]})`], ['IT critical load', `${f0(R.D.it)} kW (${f0(R.D.racks)} racks at ${S.dc.density} kW)`], ['Facility peak / MD', `${f0(R.D.fac)} kW / ${f0(R.D.md)} kVA, peak PUE ${f2(R.D.pueP)}`], ['UPS', `${R.D.upsI} × ${S.dc.upsModule} kW (${R.D.red.rU}), battery ${f0(R.D.batt)} kWh`], ['Generators', `${R.D.genI} × ${f0(S.dc.genKva)} kVA (${R.D.red.rG}), fuel ${f0(R.D.fuel)} l`], ['Transformers', `${R.D.txI} × ${f0(S.dc.txKva)} kVA (${R.D.red.rT})`], ['Cooling', `${R.D.crah} CRAH, ${R.D.chill} chillers, ${f0(R.D.heat)} kW heat`], ['Rack power', `${R.D.rackPdu} on ${R.D.paths} path(s)`], ...aiReportRows(R.D)]) + `<p class="s">AI platform values come from a dated library (v${esc(AIDC.version)}, data as of ${esc(AIDC.asOf)}) of vendor and trade-press figures. They are editable planning defaults, not verified code or manufacturer values; confirm with the vendor, operator and network operator. Mitigations: ${AI_DYN.mitigations.map(esc).join(' ')}</p>` : ''}
-  ${sec('Maximum demand')}${tbl(['Source', 'kVA'], [['Area loads', f1(R.Z.kva)], ['Equipment loads', f1(R.Lo.kva)], ['Lifts', f1(R.Li.kva)], ['Pumps (normal supply)', f1(R.P.kva)], ['Data centre', f1(R.D ? R.D.md : 0)], [`Spare (${pct(+p.spare)})`, f1(R.spare)]], ['Total maximum demand', f1(R.md)])}
+  ${sec('Maximum demand')}${R.PB != null ? `<p>Maximum demand is based on the imported panel schedules (${R.RV.panels.map(p => esc(p.name)).join(', ')}); the area and equipment schedules are not added.</p>` + tbl(['Source', 'kVA'], [...R.RV.panels.map(p => [`Panel ${esc(p.name)} (demand)`, f1(p.dem)]), ['Lifts', f1(R.Li.kva)], ['Pumps (normal supply)', f1(R.P.kva)], ['Data centre', f1(R.D ? R.D.md : 0)], [`Spare (${pct(+p.spare)})`, f1(R.spare)]], ['Total maximum demand', f1(R.md)]) : tbl(['Source', 'kVA'], [['Area loads', f1(R.Z.kva)], ['Equipment loads', f1(R.Lo.kva)], ['Lifts', f1(R.Li.kva)], ['Pumps (normal supply)', f1(R.P.kva)], ['Data centre', f1(R.D ? R.D.md : 0)], [`Spare (${pct(+p.spare)})`, f1(R.spare)]], ['Total maximum demand', f1(R.md)])}
   ${sec('Supply, transformers and switchgear')}${tbl(['Item', 'Value'], [['Transformers', R.txKva ? `${R.nTx} × ${f0(R.txKva)} kVA, Uk ${S.sizing.uk}%, ${esc(S.sizing.txType)}` : 'Review'], ['Full-load current', R.flc ? `${f0(R.flc)} A` : '–'], ['LV fault level', R.flP ? `${f1(R.flP)} kA (infinite source)` : '–'], ['Main incomer / busbar', R.incomer ? `${f0(R.incomer)} A` : '–'], ['Short-circuit rating', R.icw ? `${R.icw} kA, 1 s` : '–'], ['Transformer room', R.room ? `${f1(R.room.L)} × ${f1(R.room.W)} m, ${f1(R.room.H)} m clear` : '–'], ['LV switchroom', R.room ? `${f1(R.room.swA)} m²` : '–'], ['Ventilation', R.room ? `${f2(R.room.vent)} m³/s for ${f1(R.room.loss)} kW losses` : '–'], ['Standby generator', R.gen ? `${f0(R.gen)} kVA (${pct(S.sizing.essential)} essential × ${S.sizing.genMargin})` : '–']])}
   ${sec('Earthing and bonding')}${tbl(['Item', 'Value'], [['Earthing system', esc(c.earthing)], ['Main earthing conductor', `${R.met} mm² Cu (Table 54.7)`], ['Main protective bonding', `${R.bond} mm² Cu`], ['Transformer neutral–earth', R.nEarth ? `${R.nEarth} mm² Cu` : '–']])}
   ${R.C.length ? sec('Cable and protection schedule') + tbl(['Ref', 'From', 'Description', 'Ib A', 'In A', 'mm²', 'Iz A', 'VD %', 'Zs Ω', 'Result'], R.C.map(r => [esc(r.k.ref), esc(r.k.from), esc(r.k.desc), f1(r.ib), r.inr ?? '–', r.csa ?? '–', r.Iz ? f1(r.Iz) : '–', r.vd != null ? f2(r.vd) : '–', r.zs != null ? f2(r.zs) : '–', esc(r.status)])) + `<ul class="s">${R.C.filter(r => r.spec).map(r => `<li>${esc(r.k.ref)}: ${esc(r.spec)}</li>`).join('')}</ul>` : ''}
@@ -1313,6 +1364,7 @@ function reportBody() {
     `<p class="s">Only checks needing attention are listed. Layout is schematic for design development; luminaire spacing, emergency lighting and socket positions must be verified against photometric data and the architecture. This is a design pre-check, not certification.</p>` : ''}
   ${R.RV.sheets.length ? sec('Drawing review (imported DXF)') + `<p>Drawings reviewed: ${R.RV.sheets.map(x => esc(x.file)).join(', ')}. Symbol meanings were learned from each drawing's legend and confirmed or corrected by the designer. Pre-checks: ${R.RV.nBad} fail, ${R.RV.nWarn} to check.</p>` +
     tbl(['Room', 'Area m²', 'Luminaires', 'Emergency', 'Exit', 'Lighting W', 'W/m²', 'Sockets'], R.RV.rooms.map(r => [esc(r.name), r.area ? f1(r.area) : '–', r.lum, r.em, r.exit, f0(r.lightW), r.lpd != null ? f1(r.lpd) : '–', r.sock]), ['Total', '', R.RV.tot.lum, R.RV.tot.em, R.RV.tot.exit, f0(R.RV.tot.lightW), '', R.RV.tot.sock]) +
+    (R.RV.panels.length ? tbl(['Panel', 'Voltage', 'Isc kA', 'Incomer', 'Connected kVA', 'Demand kVA', 'Demand A'], R.RV.panels.map(p => [esc(p.name), p.vll ? p.vll + '/' + p.vln + ' V' : '–', p.isc ?? '–', p.trip ? `${p.trip}/${p.frame} A ${esc(p.dev)}` : '–', f1(p.conn), f1(p.dem), f0(p.iDem)]), ['Total', '', '', '', f1(R.RV.panelConn), f1(R.RV.panelDem), '']) : '') +
     tbl(['Block', 'Uses', 'Type', 'Code', 'W', 'Source'], R.RV.eff.filter(e => e.type !== 'Ignore').map(e => [esc(e.block), e.n, esc(e.type), esc(e.code), e.w ?? '–', esc(e.src)])) +
     (R.RV.chk.length ? tbl(['Scope', 'Check', 'Result', 'Status', 'Reference'], R.RV.chk.map(c => [esc(c.scope), esc(c.item), esc(c.res), { ok: 'Pass', warn: 'Check', bad: 'Fail' }[c.st], esc(c.ref)])) : '') +
     `<p class="s">Counts are taken from block references in the drawings; rooms without outlines are assigned to the nearest room label. Verify against the drawings. This is a design pre-check, not certification.</p>` : ''}
@@ -1350,6 +1402,8 @@ function csvSchedules() {
     const RV = R.RV;
     L.push(''); L.push(q('DRAWING REVIEW – LOAD SHEET BY ROOM (' + RV.sheets.map(x => x.file).join('; ') + ')')); L.push(['Room', 'Area m2', 'Luminaires', 'Emergency', 'Exit', 'Lighting W', 'W/m2', 'Sockets', 'Switches', 'Boards', 'Unidentified'].map(q).join(','));
     RV.rooms.forEach(r => L.push([r.name, r.area?.toFixed(1), r.lum, r.em, r.exit, r.lightW.toFixed(0), r.lpd?.toFixed(1), r.sock, r.sw, r.db, r.unk].map(q).join(',')));
+    if (RV.panels.length) { L.push(''); L.push(q('PANEL SCHEDULES (imported)' + (R.PB != null ? ' – used as maximum demand basis' : ''))); L.push(['Panel', 'V L-L', 'Isc kA', 'Incomer trip A', 'Frame A', 'Device', 'Category', 'Connected kVA', 'Demand factor', 'Demand kVA', 'Demand A'].map(q).join(','));
+      RV.panels.forEach(p => { p.cats.forEach(c => L.push([p.name, p.vll, p.isc, p.trip, p.frame, p.dev, c.name, c.conn, c.df, c.dem].map(q).join(','))); L.push([p.name, p.vll, p.isc, p.trip, p.frame, p.dev, 'TOTAL', p.conn, '', p.dem, p.iDem.toFixed(0)].map(q).join(',')); }); }
     L.push(''); L.push(q('DRAWING REVIEW – SYMBOL MAPPING')); L.push(['Block', 'Uses', 'Layers', 'Code', 'Description', 'Type', 'W', 'Source'].map(q).join(','));
     RV.eff.forEach(e => L.push([e.block, e.n, e.layers.join(' '), e.code, e.desc, e.type, e.w, e.src].map(q).join(',')));
     L.push(''); L.push(q('DRAWING REVIEW – PRE-CHECKS (not certification)')); L.push(['Scope', 'Check', 'Result', 'Status', 'Reference'].map(q).join(','));
