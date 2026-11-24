@@ -10,9 +10,13 @@ Electrical load assessment and design tools for buildings, usable across 94 coun
 |---|---|
 | `Electrical Load Design Report.xlsx` | Excel design template (27 sheets): regional load schedules, NEC/CEC code calculation, equipment loads with demand/diversity/simultaneity factors, lifts, pumps, data centre, BS 7671 cable and protection, transformers and switchrooms, energy management, compliance checklist, utility application data. |
 | `_build/` | Node.js scripts that generate the workbook. |
-| `app/load-designer.html` | Single-file web app (NexvoraHub Studio): load assessment, design report, AI data-centre planning, electrical drawing generator (DXF), drawing review with legend learning, panel-schedule import and design on submitted layouts. |
+| `app/load-designer.html` | Single-file web app (NexvoraHub Studio): load assessment, design report, AI data-centre planning, electrical drawing generator (DXF), drawing review with legend learning, panel-schedule import and design on submitted layouts, and a facility management performance board. |
 | `app/src/` | App source, AI data-centre library (`ai-dc-data.json`), data extractor, local preview server and headless tests. |
 | `site/index.html` | Standalone build of the app for web hosting. Only this folder is published. |
+
+## Facility management performance board
+
+Stages 13–14 of the app. **FM data input** takes the reporting period, targets, and one row per hard or soft service contract (contractor, contract reference and dates, annual value, response time, SLA target, reactive calls raised / completed / completed within SLA / overdue, PPM tasks planned and completed, KPI audit score), plus assets (failures, repair hours, downtime), an incident log, SOP compliance, CAPEX and OPEX, customer satisfaction, energy and water, safety and fire, and optimisation strategies. **FM performance board** turns these into a tile grid: executive summary, SLA / PPM / MTTR / MTBF / availability / satisfaction gauges, incident summary, services and contract compliance (with contracts due for renewal within 90 days flagged), SOP compliance, MTTR and MTBF by equipment, energy and CO₂, CAPEX and OPEX, work orders, asset management, and safety and fire. The board filters to hard services, soft services, or both, exports to CSV and prints to PDF. Floor area and the CO₂ factor default to the area load schedule and the project region.
 
 ## Rebuild the workbook
 
