@@ -278,4 +278,37 @@ out.layoutChecks = lyFail.length ? lyFail : 'all passed';
   S.review = JSON.parse(pvSave); R = calcAll(); pchk('default basis unchanged', R.PB == null && near(R.md, mdArea));
   out.panels = ps.panels.map(q => [q.name, q.conn, q.dem, q.trip, q.vll]);
   out.panelChecks = pFail.length ? pFail : 'all passed'; }
+
+// ---- FM performance board (hard + soft services, SLA, contracts, PPM) ----
+{ const fFail = [], fchk = (n, ok, info) => { if (!ok) fFail.push(n + (info !== undefined ? ' ' + JSON.stringify(info) : '')); };
+  const fnear = (a, b, tol = 0.05) => Math.abs(a - b) <= tol;
+  const fmSave = JSON.stringify({ fm: S.fm, fmServices: S.fmServices, fmAssets: S.fmAssets, fmIncidents: S.fmIncidents });
+  S.fm.scope = 'All'; let M = calcFM();
+  fchk('sla all', fnear(M.sla, 677 / 702 * 100), M.sla); fchk('ppm all', fnear(M.ppm, 2991 / 3027 * 100), M.ppm);
+  fchk('wo totals', M.wo.total === 3027 + 709 && M.wo.completed === 2991 + 702 && M.wo.overdue === 5, M.wo);
+  fchk('mttr', fnear(M.mttr, (14 + 1.5 + 1.8 + 16 + 2.2 + 4.5 + 3.4) / 25), M.mttr);
+  fchk('incidents', M.inc.length === 9 && M.bySev[0][1] === 2 && M.open === 3 && M.critOpen === 1, [M.inc.length, M.bySev, M.open]);
+  S.fm.scope = 'Soft'; M = calcFM();
+  fchk('soft scope services', M.svc.length === 5 && M.svc.every(r => r.s.kind === 'Soft'));
+  fchk('soft scope has no hard assets', M.assets.length === 0 && M.noFail === false && isNaN(M.mttr));
+  fchk('soft incidents', M.inc.length === 4, M.inc.map(i => i.svc));
+  fchk('soft capex/opex', M.capex.length === 1 && M.opex.length === 4, [M.capex.length, M.opex.length]);
+  S.fm.scope = 'Hard'; M = calcFM();
+  fchk('hard scope', M.svc.length === 6 && M.assets.length === 7 && M.sop.length === 6, [M.svc.length, M.assets.length, M.sop.length]);
+  const now = Date.parse('2026-11-24'); M = calcFM(now);
+  fchk('contract expiry flag', M.svc.find(r => r.s.name === FM_STD.Hard[4]).exp[0] === 'warn', M.svc.map(r => r.exp));
+  // rename a service: linked assets and incidents follow
+  const old = S.fmServices[0].name; onEdit({ target: { dataset: { arr: 'fmServices', i: '0', k: 'name' }, type: 'text', value: 'HVAC renamed', matches: () => false } }, true);
+  fchk('rename follows links', S.fmAssets[0].svc === 'HVAC renamed' && !S.fmAssets.some(a => a.svc === old));
+  S.fm.scope = 'All'; view = 'fm-board'; render(); const bh = document.querySelector('#main').innerHTML;
+  fchk('board renders tiles', /Executive summary/.test(bh) && /Incident summary/.test(bh) && /MTBF by equipment/.test(bh) && /CAPEX summary/.test(bh) && /Safety &amp; fire compliance|Safety & fire compliance/.test(bh));
+  view = 'fm-input'; render(); const ih = document.querySelector('#main').innerHTML;
+  fchk('input renders', /Services, contracts, SLA &amp; PPM|Services, contracts, SLA & PPM/.test(ih) && /data-arr="fmAssets"/.test(ih));
+  fchk('csv', /FACILITY MANAGEMENT PERFORMANCE BOARD/.test(fmCsv()) && /SERVICES/.test(fmCsv()));
+  const legacy = JSON.parse(JSON.stringify(S)); ['fm', 'fmServices', 'fmAssets', 'fmIncidents', 'fmSop', 'fmCapex', 'fmOpex', 'fmCsat'].forEach(k => delete legacy[k]);
+  upgrade(legacy); fchk('old project upgraded', legacy.fm && legacy.fmServices.length === 11);
+  const blank = fmBlank(); fchk('blank fm', blank.fmServices.length === 0 && blank.fm.targets.sla === 95);
+  Object.assign(S, JSON.parse(fmSave)); S.fm.scope = 'All'; view = 'project';
+  out.fm = [+M.sla.toFixed(2), +M.ppm.toFixed(2), M.svc.length];
+  out.fmChecks = fFail.length ? fFail : 'all passed'; }
 for (const [k, v] of Object.entries(out)) console.log(k, '=', JSON.stringify(v));
